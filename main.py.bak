@@ -1,0 +1,456 @@
+import gradio as gr
+import json
+import os
+from PIL import Image
+import copy
+
+# --- Configuration ---
+DATA_JSON_PATH = 'data.json'
+SCHEMA_JSON_PATH = 'schema.json'
+IMAGE_ROOT_PATH = 'images'
+CACHE_JSON_PATH = 'cache.json'
+
+# --- Data Loading ---
+def load_json(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+def save_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# --- Main Application Logic ---
+data_json = load_json(DATA_JSON_PATH)
+schema_json = load_json(SCHEMA_JSON_PATH)
+# data.json의 파일 경로가 /mnt/AI_NAS/.. 로 되어있으므로, 실제 로컬 경로에 맞게 수정합니다.
+# 예: /mnt/AI_NAS/Data/현대캐피탈/labeling/hk_1/images/NSG_044-004 (068).jpg -> images/068/NSG_044-004 (068).jpg
+def convert_path(original_path, form_number):
+    # 모든 슬래시를 언더바로 변경
+    filename = original_path.replace('/', '_')
+    return os.path.join(IMAGE_ROOT_PATH, form_number, filename)
+
+# data_json의 경로를 로컬 경로로 변환
+converted_data_json = copy.deepcopy(data_json)
+for form_number, form_data in converted_data_json.items():
+    new_form_data = {}
+    for path, ocr_data in form_data.items():
+        new_path = convert_path(path, form_number)
+        new_form_data[new_path] = ocr_data
+    converted_data_json[form_number] = new_form_data
+    
+# UI 업데이트를 위한 함수들
+def get_form_numbers():
+    return list(data_json.keys())
+
+def update_key_dropdown(form_number):
+    if not form_number:
+        return gr.Dropdown(choices=[], value=None)
+    key_numbers = list(schema_json.get(form_number, {}).keys())
+    return gr.Dropdown(choices=key_numbers, value=key_numbers[0] if key_numbers else None, interactive=True)
+
+def update_view(form_number, key_number, current_index, state_data):
+    if not form_number or not key_number:
+        return None, "양식과 키를 선택하세요.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None)
+
+    # 현재 form_number에 해당하는 이미지 파일 목록 가져오기
+    image_files = list(converted_data_json.get(form_number, {}).keys())
+    if not image_files:
+        return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None)
+
+    total_images = len(image_files)
+    # index 보정
+    current_index = max(0, min(current_index, total_images - 1))
+    
+    image_path = image_files[current_index]
+    
+    # schema에서 좌표 및 ocr_key 정보 가져오기
+    key_info = schema_json.get(form_number, {}).get(key_number, {})
+    x, y = key_info.get('x'), key_info.get('y')
+    ocr_key_value = key_info.get('ocr_key', 'N/A')
+    is_checkbox = key_info.get('checkbox', False)
+    
+
+    # OCR 데이터 가져오기
+    ocr_value = converted_data_json.get(form_number, {}).get(image_path, {}).get(key_number, "N/A")
+
+    # 상태 업데이트
+    state_data = {
+        "form_number": form_number,
+        "key_number": key_number,
+        "image_path": image_path,
+        "image_files": image_files,
+        "current_index": current_index
+    }
+
+    # Save current state to cache
+    cache_data = {
+        "form_number": form_number,
+        "key_number": key_number,
+        "current_index": current_index
+    }
+    save_json(CACHE_JSON_PATH, cache_data)
+    
+    status_text = f"{current_index + 1} / {total_images}"
+    filename = os.path.basename(image_path)
+
+    # is_checkbox 값에 따라 UI 컴포넌트 가시성 조절
+    if is_checkbox:
+        ocr_textbox_update = gr.update(visible=False, value=ocr_value)
+        checkbox_radio_update = gr.update(visible=True, value=ocr_value)
+    else:
+        ocr_textbox_update = gr.update(visible=True, value=ocr_value)
+        checkbox_radio_update = gr.update(visible=False, value=None)
+    # 이미지 로드 및 확대/자르기
+    if os.path.exists(image_path) and x is not None and y is not None:
+        with Image.open(image_path) as img:
+            img_w, img_h = img.size
+            
+            # 주어진 좌표(x, y)를 실제 이미지의 픽셀 좌표로 변환
+            point_x = int(x * img_w)
+            point_y = int(y * img_h)
+
+            # UI에 표시될 이미지의 가로/세로 비율 (300:150 -> 2:1)
+            display_aspect_ratio = 1.5
+
+            # 확대할 영역의 크기를 설정합니다. (원본 이미지 너비의 25%를 기준으로)
+            crop_w = img_w / 3
+            crop_h = crop_w / display_aspect_ratio
+
+            # 좌표가 확대 영역의 중심이 아닌 좌상단에 위치하도록 crop box를 계산합니다.
+            margin_ratio_x = 0.20
+            margin_ratio_y = 0.10
+            left = point_x - (crop_w * margin_ratio_x)
+            top = point_y - (crop_h * margin_ratio_y)
+            right = left + crop_w
+            bottom = top + crop_h
+
+            # crop box가 이미지 경계를 벗어나지 않도록 보정 (크기 유지)
+            if left < 0:
+                delta = -left
+                left = 0
+                right += delta
+            if top < 0:
+                delta = -top
+                top = 0
+                bottom += delta
+            if right > img_w:
+                delta = right - img_w
+                right = img_w
+                left -= delta
+            if bottom > img_h:
+                delta = bottom - img_h
+                bottom = img_h
+                top -= delta
+
+            # 최종적으로 경계값 한 번 더 확인 (부동소수점 계산 오류 등 방지)
+            left = max(0, left)
+            top = max(0, top)
+            right = min(img_w, right)
+            bottom = min(img_h, bottom)
+            
+            # 이미지를 잘라내기
+            cropped_img = img.crop((left, top, right, bottom))
+            
+            # UI에 표시될 이미지 크기 설정
+            display_w, display_h = 1200, 800
+            
+            # 잘라낸 이미지를 UI 크기로 리사이즈하여 '줌' 효과를 줌
+            zoomed_img = cropped_img.resize((display_w, display_h), Image.Resampling.LANCZOS)
+
+            return zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update
+    else:
+        return None, state_data, status_text, f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False)
+
+def change_image(state_data, direction):
+    if not state_data:
+        return None, state_data, "0 / 0", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False)
+        
+    current_index = state_data["current_index"]
+    total_images = len(state_data["image_files"])
+    
+    new_index = (current_index + direction + total_images) % total_images
+    
+    return update_view(state_data["form_number"], state_data["key_number"], new_index, state_data)
+
+def change_key(state_data, direction):
+    if not state_data or "form_number" not in state_data:
+        return gr.Dropdown()
+
+    form_number = state_data["form_number"]
+    current_key = state_data.get("key_number")
+    
+    key_numbers = list(schema_json.get(form_number, {}).keys())
+    if not key_numbers:
+        return gr.Dropdown(choices=[], value=None)
+
+    try:
+        current_key_index = key_numbers.index(current_key)
+        new_key_index = (current_key_index + direction + len(key_numbers)) % len(key_numbers)
+        new_key = key_numbers[new_key_index]
+    except (ValueError, IndexError):
+        new_key = key_numbers[0] if key_numbers else None
+    
+    return gr.Dropdown(value=new_key)
+
+def change_form(state_data, direction):
+    form_numbers = get_form_numbers()
+    current_form = state_data.get("form_number")
+
+    if not form_numbers:
+        return gr.Dropdown(choices=[], value=None)
+
+    try:
+        current_form_index = form_numbers.index(current_form)
+        new_form_index = (current_form_index + direction + len(form_numbers)) % len(form_numbers)
+        new_form = form_numbers[new_form_index]
+    except (ValueError, IndexError):
+        new_form = form_numbers[0] if form_numbers else None
+
+    return gr.Dropdown(value=new_form)
+
+def save_data(text_value, radio_value, state_data, request: gr.Request):
+    if not state_data:
+        return "저장할 데이터가 없습니다.", gr.update()
+
+    key_info = schema_json.get(state_data["form_number"], {}).get(state_data["key_number"], {})
+    is_checkbox = key_info.get('checkbox', False)
+
+    if is_checkbox:
+        new_value = radio_value
+    else:
+        # 텍스트 입력값이 비어있거나 공백만 있으면 "␣"로 대체
+        new_value = text_value if text_value and text_value.strip() else "␣"
+
+    form_number = state_data["form_number"]
+    image_path = state_data["image_path"]
+    key_number = state_data["key_number"]
+
+    # 원본 data.json의 경로를 찾아 업데이트
+    original_path = None
+    converted_basename = os.path.basename(image_path)
+    for path in data_json[form_number]:
+        if path.replace('/', '_') == converted_basename:
+            original_path = path
+            break
+    
+    if original_path:
+        # data.json과 converted_data_json 모두 업데이트
+        data_json[form_number][original_path][key_number] = new_value
+        converted_data_json[form_number][image_path][key_number] = new_value
+        
+        save_json(DATA_JSON_PATH, data_json)
+        
+        # UI 업데이트: 저장된 값을 ocr_textbox에 반영
+        if not is_checkbox and new_value == "␣":
+            return f"'{new_value}' (으)로 저장 완료!", gr.update(value=new_value)
+        return f"'{new_value}' (으)로 저장 완료!", gr.update()
+    
+    return "오류: 원본 파일 경로를 찾을 수 없습니다.", gr.update()
+
+
+def open_image_file(state_data):
+    if state_data and "image_path" in state_data:
+        image_path = state_data["image_path"]
+        if os.path.exists(image_path):
+            os.startfile(os.path.abspath(image_path))
+
+# --- Gradio UI ---
+js_keyboard_shortcuts = """
+() => {
+    document.addEventListener('keydown', (e) => {
+        // 텍스트 입력창에 포커스가 있을 때는 단축키가 동작하지 않도록 함
+        if (e.target.nodeName === "INPUT" || e.target.nodeName === "TEXTAREA") return;
+
+        if (e.key === 'ArrowLeft') {
+            document.getElementById('prev_button').click();
+        } else if (e.key === 'ArrowRight') {
+            document.getElementById('next_button').click();
+        } else if (e.key === 'ArrowUp') {
+            document.getElementById('prev_key_button').click();
+        } else if (e.key === 'ArrowDown') {
+            document.getElementById('next_key_button').click();
+        }
+    });
+}
+"""
+
+with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_shortcuts) as demo:
+    # 상태 저장을 위한 변수
+    state = gr.State({})
+    gr.Markdown("## OCR 데이터 검수 및 수정 도구")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+    
+            with gr.Row():
+                form_number_dd = gr.Dropdown(choices=get_form_numbers(), label="Form Number")
+                key_number_dd = gr.Dropdown(label="Key Number", interactive=False)
+            
+            # status_label = gr.Label("0 / 0", elem_id="status_label")
+            with gr.Row(elem_id="filename_row"):
+                filename_textbox = gr.Textbox(label="Current Filename", interactive=False)
+                open_file_btn = gr.Button("파일 열기", scale=0)
+            ocr_key_textbox = gr.Textbox(label="OCR Key", interactive=False)
+            is_checkbox_textbox = gr.Textbox(label="is_checkbox", interactive=False)
+
+            with gr.Group():
+                ocr_textbox = gr.Textbox(label="OCR 값", interactive=True, visible=True)
+                checkbox_radio = gr.Radio(["✘", "✔"], label="OCR 값", visible=False, interactive=True)
+
+
+            with gr.Row():
+                save_btn = gr.Button("저장")
+                save_status = gr.Textbox(label="저장 상태", interactive=False)
+
+            with gr.Row():
+                prev_btn = gr.Button("이전 (←)", visible=True, elem_id="prev_button")
+                next_btn = gr.Button("다음 (→)", visible=True, elem_id="next_button")
+            
+            with gr.Row():
+                prev_key_button = gr.Button("이전 Key", elem_id="prev_key_button")
+                next_key_button = gr.Button("다음 Key", elem_id="next_key_button")
+                prev_form_button = gr.Button("이전 Form", elem_id="prev_form_button")
+                next_form_button = gr.Button("다음 Form", elem_id="next_form_button")
+
+        with gr.Column(scale=1):
+            status_label = gr.Label("# 0 / 0", elem_id="status_label")
+            image_display = gr.Image(label="확대된 이미지", type="pil")
+
+    # --- Event Listeners ---
+    outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio]
+
+    form_number_dd.change(
+        fn=update_key_dropdown,
+        inputs=[form_number_dd],
+        outputs=[key_number_dd]
+    )
+    
+    # form 또는 key가 변경되면 뷰를 업데이트
+    form_number_dd.change(
+        fn=lambda form, key, state: update_view(form, key, 0, state),
+        inputs=[form_number_dd, key_number_dd, state],
+        outputs=outputs_list
+    )
+    key_number_dd.change(
+        fn=lambda form, key, state: update_view(form, key, 0, state),
+        inputs=[form_number_dd, key_number_dd, state],
+        outputs=outputs_list
+    )
+    
+    # 이전/다음 버튼 클릭 이벤트
+    prev_btn.click(
+        fn=lambda s: change_image(s, -1),
+        inputs=[state],
+        outputs=outputs_list
+    )
+    next_btn.click(
+        fn=lambda s: change_image(s, 1),
+        inputs=[state],
+        outputs=outputs_list
+    )
+
+    # 저장 버튼 클릭 이벤트
+    save_btn.click(
+        fn=save_data,
+        inputs=[ocr_textbox, checkbox_radio, state, ],
+        outputs=[save_status, ocr_textbox]
+    )
+
+    open_file_btn.click(
+        fn=open_image_file,
+        inputs=[state],
+        outputs=None
+    )
+
+    # 숨겨진 버튼 이벤트 리스너
+    prev_key_button.click(
+        fn=lambda s: change_key(s, -1),
+        inputs=[state],
+        outputs=[key_number_dd]
+    )
+    next_key_button.click(
+        fn=lambda s: change_key(s, 1),
+        inputs=[state],
+        outputs=[key_number_dd]
+    )
+    prev_form_button.click(
+        fn=lambda s: change_form(s, -1),
+        inputs=[state],
+        outputs=[form_number_dd]
+    )
+    next_form_button.click(
+        fn=lambda s: change_form(s, 1),
+        inputs=[state],
+        outputs=[form_number_dd]
+    )
+
+
+    # --- App Load Event ---
+    def on_load(state):
+        cache = load_json(CACHE_JSON_PATH)
+        form_number = cache.get("form_number")
+        key_number = cache.get("key_number")
+        current_index = cache.get("current_index", 0)
+
+        all_forms = get_form_numbers()
+        if not form_number or form_number not in all_forms:
+            form_number = all_forms[0] if all_forms else None
+            key_number = None # Reset key if form is reset
+            current_index = 0
+
+        key_dd_update = update_key_dropdown(form_number)
+        
+        all_keys = key_dd_update.choices
+        if not key_number or key_number not in all_keys:
+            key_number = all_keys[0] if all_keys else None
+        
+        key_dd_update.value = key_number # Set the final key value
+
+        # update_view will be called with the cached/default values
+        view_outputs = update_view(form_number, key_number, current_index, state)
+        
+        # view_outputs is: zoomed_img, ocr_value, state_data, status_text, filename, ocr_key_value
+        zoomed_img, updated_state, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update = view_outputs
+
+        # The return tuple must match the order of the 'load_outputs' list
+        return (
+            form_number,
+            key_dd_update,
+            zoomed_img,
+            updated_state,
+            status_text,
+            filename,
+            ocr_key_value,
+            is_checkbox,
+            ocr_textbox_update,
+            checkbox_radio_update
+        )
+
+    # Define all components that will be updated by the load event
+    load_outputs = [
+        form_number_dd, 
+        key_number_dd, 
+        image_display, 
+        state, 
+        status_label, 
+        filename_textbox, 
+        ocr_key_textbox,
+        is_checkbox_textbox,
+        ocr_textbox,
+        checkbox_radio
+    ]
+    
+    demo.load(
+        fn=on_load,
+        inputs=[state],
+        outputs=load_outputs
+    )
+
+
+if __name__ == "__main__":
+    demo.launch()
