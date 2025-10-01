@@ -184,8 +184,20 @@ def update_view(form_number, key_number, current_index, state_data):
                 zoomed_img = zoomed_img.convert('RGBA')
 
             # 형광펜으로 사용할 반투명 노란색 레이어 생성
-            highlighter_color = (245, 226, 39, 100) # Yellow with alpha for transparency
-            highlighter_size = (100, 50)
+            highlighter_color = (245, 226, 39, 140) # Yellow with alpha for transparency (increased from 100 to 140)
+
+            # is_checkbox에 따라 하이라이트 크기 결정
+            if is_checkbox:
+                # 체크박스는 고정 크기 사용
+                highlighter_size = (100, 50)
+            else:
+                # 텍스트는 렌더링 폭에 비례하여 크기 결정 (반각 5개 = 100px 기준)
+                # 반각 문자(ASCII)는 1, 전각 문자(한글 등)는 2로 계산
+                text_str = str(ocr_value) if ocr_value != "N/A" else "     "
+                display_width = sum(2 if ord(c) > 127 else 1 for c in text_str)
+                highlighter_width = max(20, display_width * 20)  # 최소 20px, 반각 기준 1당 20px
+                highlighter_size = (highlighter_width, 50)
+
             highlighter = Image.new('RGBA', zoomed_img.size, (255, 255, 255, 0)) # Transparent layer
             draw = ImageDraw.Draw(highlighter)
 
