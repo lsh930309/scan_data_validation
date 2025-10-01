@@ -60,12 +60,12 @@ def update_key_dropdown(form_number):
 
 def update_view(form_number, key_number, current_index, state_data):
     if not form_number or not key_number:
-        return None, "양식과 키를 선택하세요.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None)
+        return None, "양식과 키를 선택하세요.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     # 현재 form_number에 해당하는 이미지 파일 목록 가져오기
     image_files = list(converted_data_json.get(form_number, {}).keys())
     if not image_files:
-        return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None)
+        return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     total_images = len(image_files)
     # index 보정
@@ -104,9 +104,11 @@ def update_view(form_number, key_number, current_index, state_data):
     if total_images > 0:
         progress_percent = ((current_index + 1) / total_images) * 100
         progress_text = f"{current_index + 1} / {total_images}"
+        # 100% 완료 시 빨간색, 진행 중일 때 노란색
+        bar_color = "#ff0000" if progress_percent >= 100 else "#ffdd57"
         status_markdown = f"""
 <div style="position: relative; height: 80px; width: 100%; background-color: #333; border-radius: 5px; overflow: hidden;">
-    <div style="position: absolute; left: 0; top: 0; height: 100%; width: {progress_percent}%; background-color: #ffdd57;"></div>
+    <div style="position: absolute; left: 0; top: 0; height: 100%; width: {progress_percent}%; background-color: {bar_color};"></div>
     <div style="position: absolute; left: 0; top: 0; height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; font-size: 2.5em; font-weight: 900; color: white; mix-blend-mode: difference;">{progress_text}</div>
 </div>
 """
@@ -213,19 +215,26 @@ def update_view(form_number, key_number, current_index, state_data):
             draw.rectangle([marker_x, marker_y - (0.7 * highlighter_size[1]), marker_x + highlighter_size[0], marker_y + (0.3 * highlighter_size[1])], fill=highlighter_color)
             zoomed_img = Image.alpha_composite(zoomed_img, highlighter)
 
-            return zoomed_img, state_data, status_markdown, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update
+            # 버튼 활성화 상태 결정
+            prev_btn_interactive = current_index > 0
+            next_btn_interactive = current_index < total_images - 1
+
+            return zoomed_img, state_data, status_markdown, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive)
     else:
-        return None, state_data, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False)
+        return None, state_data, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True)
 
 def change_image(state_data, direction):
     if not state_data:
-        return None, state_data, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False)
-        
+        return None, state_data, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True)
+
     current_index = state_data["current_index"]
     total_images = len(state_data["image_files"])
-    
-    new_index = (current_index + direction + total_images) % total_images
-    
+
+    # 경계 체크: 범위를 벗어나면 현재 인덱스 유지
+    new_index = current_index + direction
+    if new_index < 0 or new_index >= total_images:
+        new_index = current_index
+
     return update_view(state_data["form_number"], state_data["key_number"], new_index, state_data)
 
 def change_key(state_data, direction):
@@ -375,7 +384,7 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
             image_display = gr.Image(label="이미지", type="pil")
 
     # --- Event Listeners ---
-    outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio]
+    outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio, prev_btn, next_btn]
 
     form_number_dd.change(
         fn=update_key_dropdown,
@@ -467,7 +476,7 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         view_outputs = update_view(form_number, key_number, current_index, state)
         
         # view_outputs is: zoomed_img, ocr_value, state_data, status_text, filename, ocr_key_value
-        zoomed_img, updated_state, status_markdown, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update = view_outputs
+        zoomed_img, updated_state, status_markdown, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update = view_outputs
 
         # The return tuple must match the order of the 'load_outputs' list
         return (
@@ -480,21 +489,25 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
             ocr_key_value,
             is_checkbox,
             ocr_textbox_update,
-            checkbox_radio_update
+            checkbox_radio_update,
+            prev_btn_update,
+            next_btn_update
         )
 
     # Define all components that will be updated by the load event
     load_outputs = [
-        form_number_dd, 
-        key_number_dd, 
-        image_display, 
-        state, 
-        status_label, 
-        filename_textbox, 
+        form_number_dd,
+        key_number_dd,
+        image_display,
+        state,
+        status_label,
+        filename_textbox,
         ocr_key_textbox,
         is_checkbox_textbox,
         ocr_textbox,
-        checkbox_radio
+        checkbox_radio,
+        prev_btn,
+        next_btn
     ]
     
     demo.load(
