@@ -4,7 +4,7 @@ import os
 # --- Configuration ---
 DATA_JSON_PATH = 'data.json'
 BACKUP_JSON_PATH = 'data.json.bak' # 비교할 원본 파일
-OUTPUT_JSONC_PATH = r'handout\data.jsonc'   # 변경점이 주석으로 표기될 파일
+OUTPUT_JSONC_PATH = r'handout\data_v3.jsonc'   # 변경점이 주석으로 표기될 파일
 
 # --- Data Loading ---
 def load_json(path):
