@@ -1,10 +1,51 @@
 import json
 import os
+import re
+import glob
 
 # --- Configuration ---
 DATA_JSON_PATH = 'data.json'
 BACKUP_JSON_PATH = 'data.json.bak' # 비교할 원본 파일
-OUTPUT_JSONC_PATH = r'handout\data_v3.jsonc'   # 변경점이 주석으로 표기될 파일
+HANDOUT_DIR = 'handout'  # 출력 디렉토리
+
+# --- Auto Versioning ---
+def get_next_version_filename():
+    """
+    handout 폴더의 기존 파일들을 확인하여 다음 버전 번호를 자동으로 결정합니다.
+    예: data_v1.jsonc, data_v2.jsonc가 있으면 data_v3.jsonc를 반환
+    """
+    # handout 디렉토리가 없으면 생성
+    if not os.path.exists(HANDOUT_DIR):
+        os.makedirs(HANDOUT_DIR)
+        print(f"'{HANDOUT_DIR}' 폴더를 생성했습니다.")
+        return os.path.join(HANDOUT_DIR, 'data_v1.jsonc')
+
+    # data_v*.jsonc 패턴의 파일 찾기
+    pattern = os.path.join(HANDOUT_DIR, 'data_v*.jsonc')
+    existing_files = glob.glob(pattern)
+
+    if not existing_files:
+        # 버전 파일이 없으면 v1부터 시작
+        return os.path.join(HANDOUT_DIR, 'data_v1.jsonc')
+
+    # 기존 파일에서 버전 번호 추출
+    version_numbers = []
+    for filepath in existing_files:
+        filename = os.path.basename(filepath)
+        # data_v숫자.jsonc 패턴에서 숫자 추출
+        match = re.search(r'data_v(\d+)\.jsonc', filename)
+        if match:
+            version_numbers.append(int(match.group(1)))
+
+    if version_numbers:
+        # 가장 큰 버전 번호 + 1
+        next_version = max(version_numbers) + 1
+    else:
+        next_version = 1
+
+    next_filename = os.path.join(HANDOUT_DIR, f'data_v{next_version}.jsonc')
+    print(f"다음 버전 파일명: {next_filename}")
+    return next_filename
 
 # --- Data Loading ---
 def load_json(path):
@@ -111,5 +152,9 @@ if __name__ == "__main__":
             print("--- 변경점이 없습니다. ---")
         else:
             print(f"--- {len(changes)}개의 변경점을 발견했습니다. ---")
+
+            # 자동으로 다음 버전 파일명 결정
+            output_path = get_next_version_filename()
+
             jsonc_content = generate_jsonc(new_data, changes)
-            save_to_file(jsonc_content, OUTPUT_JSONC_PATH)
+            save_to_file(jsonc_content, output_path)
