@@ -1,2 +1,4 @@
 **/images/
 **/handout/
+**/__pycache__/
+**/.claude/
