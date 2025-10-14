@@ -391,20 +391,11 @@ def update_view(form_number, key_number, current_index, state_data):
     }
     save_json(CACHE_JSON_PATH, cache_data)
 
-    # 프로그레스바 Markdown 생성
+    # 진행 상태 텍스트 생성
     if total_images > 0:
-        progress_percent = ((current_index + 1) / total_images) * 100
-        progress_text = f"{current_index + 1} / {total_images}"
-        # 100% 완료 시 빨간색, 진행 중일 때 노란색
-        bar_color = "#ff0000" if progress_percent >= 100 else "#ffdd57"
-        status_markdown = f"""
-<div style="position: relative; height: 80px; width: 100%; background-color: #333; border-radius: 5px; overflow: hidden;">
-    <div style="position: absolute; left: 0; top: 0; height: 100%; width: {progress_percent}%; background-color: {bar_color};"></div>
-    <div style="position: absolute; left: 0; top: 0; height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; font-size: 2.5em; font-weight: 900; color: white; mix-blend-mode: difference;">{progress_text}</div>
-</div>
-"""
+        status_text = f"{current_index + 1} / {total_images}"
     else:
-        status_markdown = "0 / 0"
+        status_text = "0 / 0"
     filename = os.path.basename(image_path)
 
     # is_checkbox 값에 따라 UI 컴포넌트 가시성 조절
@@ -435,7 +426,7 @@ def update_view(form_number, key_number, current_index, state_data):
             prev_btn_interactive = current_index > 0
             next_btn_interactive = current_index < total_images - 1
 
-            return zoomed_img, state_data, status_markdown, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive)
+            return zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive)
 
     return None, state_data, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True)
 
@@ -596,7 +587,7 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
                 next_form_button = gr.Button("다음 Form (PageDown)", elem_id="next_form_button")
 
         with gr.Column(scale=1):
-            status_label = gr.Markdown("0 / 0", elem_id="status_label")
+            status_label = gr.Label(value="0 / 0", label="진행 상태", elem_id="status_label")
             image_display = gr.Image(label="이미지", type="pil")
 
     # --- Event Listeners ---
@@ -690,9 +681,9 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
 
         # update_view will be called with the cached/default values
         view_outputs = update_view(form_number, key_number, current_index, state)
-        
-        # view_outputs is: zoomed_img, ocr_value, state_data, status_text, filename, ocr_key_value
-        zoomed_img, updated_state, status_markdown, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update = view_outputs
+
+        # view_outputs is: zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update
+        zoomed_img, updated_state, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update = view_outputs
 
         # The return tuple must match the order of the 'load_outputs' list
         return (
@@ -700,7 +691,7 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
             key_dd_update,
             zoomed_img,
             updated_state,
-            status_markdown,
+            status_text,
             filename,
             ocr_key_value,
             is_checkbox,
