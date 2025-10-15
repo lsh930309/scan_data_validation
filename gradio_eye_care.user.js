@@ -23,7 +23,11 @@
         contrast: GM_getValue('contrast', 1.0),           // 대비 (0.0 ~ 2.0)
         transitionSpeed: GM_getValue('transitionSpeed', 200), // 전환 속도 (ms)
         enableFilter: GM_getValue('enableFilter', true),  // 필터 활성화
-        overlayColor: GM_getValue('overlayColor', 'rgba(0, 0, 0, 0.2)') // 오버레이 색상
+        overlayColor: GM_getValue('overlayColor', 'rgba(0, 0, 0, 0.2)'), // 오버레이 색상
+
+        // 키다운 매크로 설정
+        enableMacro: GM_getValue('enableMacro', false),   // 매크로 활성화
+        macroInterval: GM_getValue('macroInterval', 0.3)  // 자동 입력 간격 (초)
     };
 
     // ===== CSS 스타일 주입 =====
@@ -269,6 +273,25 @@
                 <input type="range" id="overlay-slider" min="0" max="0.5" step="0.05" value="0.2">
             </label>
 
+            <hr style="border: none; border-top: 1px solid #555; margin: 15px 0;">
+            <h4 style="margin: 10px 0 5px 0; font-size: 12px;">⌨️ 자동 넘기기 매크로</h4>
+
+            <label>
+                <input type="checkbox" id="enable-macro" ${CONFIG.enableMacro ? 'checked' : ''}>
+                매크로 활성화
+            </label>
+
+            <div style="background: #1a1a1a; padding: 8px; border-radius: 4px; margin: 8px 0; font-size: 10px; line-height: 1.4;">
+                <strong>사용법:</strong><br>
+                • 시작: <code>Ctrl + ← / →</code><br>
+                • 중지: <code>반대 방향키</code> 누르기
+            </div>
+
+            <label>
+                자동 입력 간격 <span class="value-display" id="interval-value">${CONFIG.macroInterval}초</span>
+                <input type="range" id="interval-slider" min="0.1" max="2.0" step="0.1" value="${CONFIG.macroInterval}">
+            </label>
+
             <button id="apply-settings">적용</button>
             <button id="reset-settings">초기화</button>
             <button id="close-settings">닫기</button>
@@ -300,6 +323,9 @@
         document.getElementById('speed-slider').addEventListener('input', (e) => {
             document.getElementById('speed-value').textContent = e.target.value + 'ms';
         });
+        document.getElementById('interval-slider').addEventListener('input', (e) => {
+            document.getElementById('interval-value').textContent = e.target.value + '초';
+        });
 
         // 적용 버튼
         document.getElementById('apply-settings').addEventListener('click', () => {
@@ -311,12 +337,18 @@
             const overlayAlpha = parseFloat(document.getElementById('overlay-slider').value);
             CONFIG.overlayColor = `rgba(0, 0, 0, ${overlayAlpha})`;
 
+            // 매크로 설정
+            CONFIG.enableMacro = document.getElementById('enable-macro').checked;
+            CONFIG.macroInterval = parseFloat(document.getElementById('interval-slider').value);
+
             // 저장
             GM_setValue('brightness', CONFIG.brightness);
             GM_setValue('contrast', CONFIG.contrast);
             GM_setValue('transitionSpeed', CONFIG.transitionSpeed);
             GM_setValue('enableFilter', CONFIG.enableFilter);
             GM_setValue('overlayColor', CONFIG.overlayColor);
+            GM_setValue('enableMacro', CONFIG.enableMacro);
+            GM_setValue('macroInterval', CONFIG.macroInterval);
 
             // 즉시 재적용
             location.reload();
@@ -329,6 +361,8 @@
             GM_setValue('transitionSpeed', 200);
             GM_setValue('enableFilter', true);
             GM_setValue('overlayColor', 'rgba(0, 0, 0, 0.2)');
+            GM_setValue('enableMacro', false);
+            GM_setValue('macroInterval', 0.3);
             location.reload();
         });
     };
@@ -501,6 +535,88 @@
         });
     };
 
+    // ===== 키다운 매크로 시스템 (Ctrl + 좌/우 방향키) =====
+    let macroState = {
+        isActive: false,        // 매크로 실행 중
+        intervalTimer: null,    // 자동 입력 인터벌
+        currentDirection: null  // 현재 방향 ('left' or 'right')
+    };
+
+    const setupKeyMacro = () => {
+        if (!CONFIG.enableMacro) return;
+
+        // 키 다운 이벤트
+        document.addEventListener('keydown', (e) => {
+            // 텍스트 입력창에서는 매크로 비활성화
+            if (e.target.nodeName === "INPUT" || e.target.nodeName === "TEXTAREA") return;
+
+            // Ctrl + 좌/우 방향키 조합 감지
+            if (e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                e.preventDefault(); // 브라우저 기본 동작 방지
+
+                const direction = e.key === 'ArrowLeft' ? 'left' : 'right';
+
+                // 이미 같은 방향으로 실행 중이면 무시
+                if (macroState.isActive && macroState.currentDirection === direction) {
+                    return;
+                }
+
+                // 다른 방향이면 기존 매크로 중지 후 새로 시작
+                if (macroState.isActive) {
+                    stopMacro();
+                }
+
+                startMacro(direction);
+                return;
+            }
+
+            // 매크로 실행 중일 때 반대 방향키 단독 입력으로 중지
+            if (macroState.isActive && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                const pressedDirection = e.key === 'ArrowLeft' ? 'left' : 'right';
+
+                // 현재 실행 중인 방향과 반대 방향이면 매크로 중지
+                if (pressedDirection !== macroState.currentDirection) {
+                    e.preventDefault(); // 기본 동작 방지 (Gradio의 원래 단축키 동작 방지)
+                    stopMacro();
+                    console.log(`[Eye Care] 반대 방향키로 매크로 중지: ${pressedDirection}`);
+                }
+            }
+        });
+    };
+
+    const startMacro = (direction) => {
+        console.log(`[Eye Care] 자동 넘기기 시작: ${direction}`);
+        macroState.isActive = true;
+        macroState.currentDirection = direction;
+
+        // 버튼 ID 결정
+        const buttonId = direction === 'left' ? 'prev_button' : 'next_button';
+
+        // 첫 클릭은 즉시 실행
+        const button = document.getElementById(buttonId);
+        if (button) button.click();
+
+        // 설정된 간격으로 버튼 클릭
+        macroState.intervalTimer = setInterval(() => {
+            const button = document.getElementById(buttonId);
+            if (button) {
+                button.click();
+                console.log(`[Eye Care] 자동 클릭: ${buttonId}`);
+            }
+        }, CONFIG.macroInterval * 1000);
+    };
+
+    const stopMacro = () => {
+        if (macroState.intervalTimer) {
+            clearInterval(macroState.intervalTimer);
+            macroState.intervalTimer = null;
+            console.log('[Eye Care] 자동 넘기기 중지');
+        }
+
+        macroState.isActive = false;
+        macroState.currentDirection = null;
+    };
+
     // ===== 초기화 =====
     const init = () => {
         injectStyles();
@@ -512,12 +628,14 @@
                 applyFilterToImages();
                 removeLoadingIndicators();
                 observeImageChanges();
+                setupKeyMacro(); // 키다운 매크로 활성화
             });
         } else {
             createSettingsPanel();
             applyFilterToImages();
             removeLoadingIndicators();
             observeImageChanges();
+            setupKeyMacro(); // 키다운 매크로 활성화
         }
 
         // 주기적으로 필터 재적용 및 로딩 제거 (Gradio의 동적 렌더링 대응)

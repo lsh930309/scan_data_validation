@@ -229,6 +229,7 @@ def get_form_numbers():
     return existing_forms
 
 def update_key_dropdown(form_number):
+    """Form 변경 시 Key dropdown을 업데이트"""
     if not form_number:
         return gr.Dropdown(choices=[], value=None)
     key_numbers = list(schema_json.get(form_number, {}).keys())
@@ -360,6 +361,7 @@ def update_view(form_number, key_number, current_index, state_data):
         return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     total_images = len(image_files)
+
     # index 보정
     current_index = max(0, min(current_index, total_images - 1))
 
@@ -383,7 +385,7 @@ def update_view(form_number, key_number, current_index, state_data):
         "current_index": current_index
     }
 
-    # Save current state to cache
+    # Save current state to cache (항상 저장)
     cache_data = {
         "form_number": form_number,
         "key_number": key_number,
@@ -568,8 +570,8 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         with gr.Column(scale=1):
     
             with gr.Row():
-                form_number_dd = gr.Dropdown(choices=get_form_numbers(), label="Form Number")
-                key_number_dd = gr.Dropdown(label="Key Number", interactive=False)
+                form_number_dd = gr.Dropdown(choices=get_form_numbers(), label="Form Number", elem_id="form_number_dropdown")
+                key_number_dd = gr.Dropdown(label="Key Number", interactive=False, elem_id="key_number_dropdown")
 
             with gr.Row(elem_id="filename_row"):
                 filename_textbox = gr.Textbox(label="Current Filename", interactive=False)
@@ -602,12 +604,13 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
     # --- Event Listeners ---
     outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio, prev_btn, next_btn]
 
+    # Form 변경 시 Key dropdown만 업데이트
     form_number_dd.change(
         fn=update_key_dropdown,
         inputs=[form_number_dd],
         outputs=[key_number_dd]
     )
-    
+
     # form 또는 key가 변경되면 뷰를 업데이트
     form_number_dd.change(
         fn=lambda form, key, state: update_view(form, key, 0, state),
