@@ -617,6 +617,71 @@
         macroState.currentDirection = null;
     };
 
+    // ===== OCR 텍스트박스 첫 클릭 시 전체 선택 =====
+    const setupOcrTextboxAutoSelect = () => {
+        // OCR 텍스트박스 찾기
+        const findOcrTextbox = () => {
+            const labels = Array.from(document.querySelectorAll('label'));
+            for (const label of labels) {
+                if (label.textContent.trim() === 'OCR 값') {
+                    const container = label.closest('.block, .form, [class*="container"]');
+                    if (container) {
+                        const input = container.querySelector('input[type="text"], textarea');
+                        // Radio 버튼 그룹이 아닌 경우만
+                        if (input && !input.closest('.radio-group, [role="radiogroup"]')) {
+                            return input;
+                        }
+                    }
+                }
+            }
+            return null;
+        };
+
+        const attachSelectAllListener = () => {
+            const ocrInput = findOcrTextbox();
+
+            if (ocrInput) {
+                // 이미 리스너가 설정되었는지 확인
+                if (ocrInput.dataset.selectAllAttached) {
+                    return;
+                }
+
+                let hasBeenFocused = false;
+
+                ocrInput.addEventListener('focus', (e) => {
+                    if (!hasBeenFocused) {
+                        // 약간의 지연을 두고 전체 선택 (Gradio의 포커스 처리 후)
+                        setTimeout(() => {
+                            e.target.select();
+                        }, 10);
+                    }
+                    hasBeenFocused = true;
+                });
+
+                ocrInput.addEventListener('blur', () => {
+                    hasBeenFocused = false;
+                });
+
+                // 리스너 설정 완료 표시
+                ocrInput.dataset.selectAllAttached = 'true';
+                console.log('✅ OCR 텍스트박스 자동 선택 기능 활성화');
+            }
+        };
+
+        // MutationObserver로 동적 생성된 텍스트박스도 감지
+        const observer = new MutationObserver(() => {
+            attachSelectAllListener();
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // 초기 설정
+        attachSelectAllListener();
+    };
+
     // ===== 초기화 =====
     const init = () => {
         injectStyles();
@@ -629,6 +694,7 @@
                 removeLoadingIndicators();
                 observeImageChanges();
                 setupKeyMacro(); // 키다운 매크로 활성화
+                setupOcrTextboxAutoSelect(); // OCR 텍스트박스 자동 선택
             });
         } else {
             createSettingsPanel();
@@ -636,6 +702,7 @@
             removeLoadingIndicators();
             observeImageChanges();
             setupKeyMacro(); // 키다운 매크로 활성화
+            setupOcrTextboxAutoSelect(); // OCR 텍스트박스 자동 선택
         }
 
         // 주기적으로 필터 재적용 및 로딩 제거 (Gradio의 동적 렌더링 대응)

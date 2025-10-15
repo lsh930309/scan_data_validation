@@ -8,6 +8,8 @@ import hashlib
 from collections import OrderedDict
 from pathlib import Path
 import io
+from cache_manager import CacheManager
+from fastapi import FastAPI
 
 # --- Configuration ---
 DATA_JSON_PATH = 'data.json'
@@ -186,6 +188,9 @@ class HybridImageCache:
 # 전역 캐시 인스턴스
 image_cache = HybridImageCache()
 
+# 상태 관리 인스턴스 (Debouncing: 2초 대기 후 저장)
+cache_manager = CacheManager(cache_file=CACHE_JSON_PATH, debounce_delay=2.0)
+
 # --- Data Loading ---
 def load_json(path):
     if not os.path.exists(path):
@@ -233,6 +238,17 @@ def update_key_dropdown(form_number):
         return gr.Dropdown(choices=[], value=None)
     key_numbers = list(schema_json.get(form_number, {}).keys())
     return gr.Dropdown(choices=key_numbers, value=key_numbers[0] if key_numbers else None, interactive=True)
+
+def update_index_dropdown(form_number):
+    """form_number에 해당하는 이미지 개수만큼 인덱스 드롭다운을 업데이트"""
+    if not form_number:
+        return gr.Dropdown(choices=[], value=None)
+    image_files = list(converted_data_json.get(form_number, {}).keys())
+    if not image_files:
+        return gr.Dropdown(choices=[], value=None)
+    # 1부터 시작하는 인덱스 목록 생성 (표시용)
+    index_choices = [f"{i+1}/{len(image_files)}" for i in range(len(image_files))]
+    return gr.Dropdown(choices=index_choices, value=index_choices[0] if index_choices else None, interactive=True)
 
 def process_image_for_display(form_number, key_number, image_path, index):
     """이미지를 처리하여 디스플레이용 이미지 생성 (캐싱 가능한 순수 함수)"""
@@ -352,12 +368,12 @@ def update_view(form_number, key_number, current_index, state_data):
     image_cache.check_schema_changed()
 
     if not form_number or not key_number:
-        return None, "양식과 키를 선택하세요.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return None, "양식과 키를 선택하세요.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     # 현재 form_number에 해당하는 이미지 파일 목록 가져오기
     image_files = list(converted_data_json.get(form_number, {}).keys())
     if not image_files:
-        return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     total_images = len(image_files)
     # index 보정
@@ -383,19 +399,22 @@ def update_view(form_number, key_number, current_index, state_data):
         "current_index": current_index
     }
 
-    # Save current state to cache
-    cache_data = {
-        "form_number": form_number,
-        "key_number": key_number,
-        "current_index": current_index
-    }
-    save_json(CACHE_JSON_PATH, cache_data)
+    # CacheManager를 통해 상태 업데이트 (주기적으로 자동 저장됨)
+    cache_manager.update_state(
+        form_number=form_number,
+        key_number=key_number,
+        current_index=current_index
+    )
 
-    # 진행 상태 텍스트 생성
+    # 진행 상태 텍스트 생성 (index와 key 진행도 모두 표시)
+    key_numbers = list(schema_json.get(form_number, {}).keys())
+    current_key_index = key_numbers.index(key_number) if key_number in key_numbers else 0
+    total_keys = len(key_numbers)
+
     if total_images > 0:
-        status_text = f"{current_index + 1} / {total_images}"
+        status_text = f"Index: {current_index + 1}/{total_images} | Key: {current_key_index + 1}/{total_keys}"
     else:
-        status_text = "0 / 0"
+        status_text = "Index: 0/0 | Key: 0/0"
     filename = os.path.basename(image_path)
 
     # is_checkbox 값에 따라 UI 컴포넌트 가시성 조절
@@ -426,13 +445,22 @@ def update_view(form_number, key_number, current_index, state_data):
             prev_btn_interactive = current_index > 0
             next_btn_interactive = current_index < total_images - 1
 
-            return zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive)
+            # key 버튼 활성화 상태 결정
+            key_numbers = list(schema_json.get(form_number, {}).keys())
+            current_key_index = key_numbers.index(key_number) if key_number in key_numbers else 0
+            prev_key_interactive = current_key_index > 0
+            next_key_interactive = current_key_index < len(key_numbers) - 1
 
-    return None, state_data, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True)
+            # index_dd 업데이트
+            index_dd_value = f"{current_index + 1}/{total_images}"
+
+            return zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive), gr.update(value=index_dd_value), gr.update(interactive=prev_key_interactive), gr.update(interactive=next_key_interactive)
+
+    return None, state_data, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
 def change_image(state_data, direction):
     if not state_data:
-        return None, state_data, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True)
+        return None, state_data, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     current_index = state_data["current_index"]
     total_images = len(state_data["image_files"])
@@ -529,6 +557,7 @@ def open_image_file(state_data):
 # --- Gradio UI ---
 js_keyboard_shortcuts = """
 () => {
+    // 키보드 단축키
     document.addEventListener('keydown', (e) => {
         // 텍스트 입력창에 포커스가 있을 때
         if (e.target.nodeName === "INPUT" || e.target.nodeName === "TEXTAREA") {
@@ -556,6 +585,11 @@ js_keyboard_shortcuts = """
             document.getElementById('next_form_button').click();
         }
     });
+
+    // 브라우저 종료/새로고침 시 캐시 저장
+    window.addEventListener('beforeunload', () => {
+        navigator.sendBeacon('/api/save-cache', new Blob());
+    });
 }
 """
 
@@ -564,12 +598,21 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
     state = gr.State({})
     gr.Markdown("## OCR 데이터 검수 및 수정 도구")
 
+    # 이전 세션 정보 표시
+    cached_state = cache_manager.get_state()
+    if cached_state.get("form_number") and cached_state.get("key_number"):
+        cache_info = f"**📌 이전 작업 지점**: Form `{cached_state['form_number']}`, Key `{cached_state['key_number']}`, Index `{cached_state['current_index']}`"
+    else:
+        cache_info = "**ℹ️ 새로운 세션**: 이전 작업 내역이 없습니다."
+    gr.Markdown(cache_info)
+
     with gr.Row():
         with gr.Column(scale=1):
-    
+
             with gr.Row():
                 form_number_dd = gr.Dropdown(choices=get_form_numbers(), label="Form Number")
                 key_number_dd = gr.Dropdown(label="Key Number", interactive=False)
+                index_dd = gr.Dropdown(label="Index", interactive=False)
 
             with gr.Row(elem_id="filename_row"):
                 filename_textbox = gr.Textbox(label="Current Filename", interactive=False)
@@ -600,12 +643,12 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
             image_display = gr.Image(label="이미지", type="pil")
 
     # --- Event Listeners ---
-    outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio, prev_btn, next_btn]
+    outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio, prev_btn, next_btn, index_dd, prev_key_button, next_key_button]
 
     form_number_dd.change(
-        fn=update_key_dropdown,
+        fn=lambda form: (update_key_dropdown(form), update_index_dropdown(form)),
         inputs=[form_number_dd],
-        outputs=[key_number_dd]
+        outputs=[key_number_dd, index_dd]
     )
     
     # form 또는 key가 변경되면 뷰를 업데이트
@@ -667,9 +710,27 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         outputs=[form_number_dd]
     )
 
+    # index_dd 변경 시 해당 인덱스로 이동
+    def on_index_change(index_str, state):
+        if not index_str or not state:
+            return outputs_list
+        # "1/10" 형식에서 숫자 추출
+        try:
+            current = int(index_str.split('/')[0]) - 1  # 0-based index로 변환
+            return update_view(state["form_number"], state["key_number"], current, state)
+        except:
+            return update_view(state["form_number"], state["key_number"], state["current_index"], state)
+
+    index_dd.change(
+        fn=on_index_change,
+        inputs=[index_dd, state],
+        outputs=outputs_list
+    )
+
     # --- App Load Event ---
     def on_load(state):
-        cache = load_json(CACHE_JSON_PATH)
+        # CacheManager에서 저장된 상태 로드
+        cache = cache_manager.get_state()
         form_number = cache.get("form_number")
         key_number = cache.get("key_number")
         current_index = cache.get("current_index", 0)
@@ -691,8 +752,8 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         # update_view will be called with the cached/default values
         view_outputs = update_view(form_number, key_number, current_index, state)
 
-        # view_outputs is: zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update
-        zoomed_img, updated_state, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update = view_outputs
+        # view_outputs is: zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update, index_dd_update, prev_key_btn_update, next_key_btn_update
+        zoomed_img, updated_state, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update, index_dd_update, prev_key_btn_update, next_key_btn_update = view_outputs
 
         # The return tuple must match the order of the 'load_outputs' list
         return (
@@ -707,7 +768,10 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
             ocr_textbox_update,
             checkbox_radio_update,
             prev_btn_update,
-            next_btn_update
+            next_btn_update,
+            index_dd_update,
+            prev_key_btn_update,
+            next_key_btn_update
         )
 
     # Define all components that will be updated by the load event
@@ -723,7 +787,10 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         ocr_textbox,
         checkbox_radio,
         prev_btn,
-        next_btn
+        next_btn,
+        index_dd,
+        prev_key_button,
+        next_key_button
     ]
     
     demo.load(
@@ -733,5 +800,21 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
     )
 
 
+# --- FastAPI 앱 생성 및 Gradio 마운트 ---
+app = FastAPI()
+
+# 브라우저 종료 시 캐시 저장 엔드포인트
+@app.post("/api/save-cache")
+async def save_cache_api():
+    print("📡 브라우저에서 저장 요청 수신")
+    cache_manager.force_save()
+    return {"status": "saved"}
+
+# Gradio 앱을 FastAPI에 마운트
+app = gr.mount_gradio_app(app, demo, path="/")
+
 if __name__ == "__main__":
-    demo.launch()
+    import uvicorn
+    print("🚀 FastAPI + Gradio 서버 시작")
+    print("📍 접속 주소: http://127.0.0.1:7860")
+    uvicorn.run(app, host="127.0.0.1", port=7860)
