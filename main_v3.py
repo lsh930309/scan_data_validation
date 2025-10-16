@@ -8,17 +8,19 @@ import hashlib
 from collections import OrderedDict
 from pathlib import Path
 import io
+import pandas as pd
 from cache_manager import CacheManager
 from fastapi import FastAPI
 
 # --- Configuration ---
-DATA_JSON_PATH = 'data.json'
+CSV_DIR = 'csv'
 SCHEMA_JSON_PATH = 'schema.json'
 IMAGE_ROOT_PATH = 'images'
 CACHE_JSON_PATH = 'cache.json'
 DISK_CACHE_PATH = os.path.join(IMAGE_ROOT_PATH, '_cache')
 MEMORY_CACHE_SIZE = 15  # ±2 이미지 + 여유분
 PRELOAD_RANGE = 2  # 현재 이미지 기준 ±2개
+EXTRACT_DIR = 'EXTRACT'  # CSV 내보내기 폴더
 
 # --- Hybrid Caching System ---
 class HybridImageCache:
@@ -193,6 +195,7 @@ cache_manager = CacheManager(cache_file=CACHE_JSON_PATH, debounce_delay=2.0)
 
 # --- Data Loading ---
 def load_json(path):
+    """JSON 파일을 로드합니다 (schema.json용)"""
     if not os.path.exists(path):
         return {}
     with open(path, 'r', encoding='utf-8') as f:
@@ -201,33 +204,93 @@ def load_json(path):
         except json.JSONDecodeError:
             return {}
 
-def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def load_csv_data():
+    """csv/ 폴더의 모든 CSV 파일을 로드하여 딕셔너리로 반환합니다"""
+    csv_data = {}
+    if not os.path.exists(CSV_DIR):
+        print(f"경고: {CSV_DIR} 폴더가 없습니다.")
+        return csv_data
+
+    csv_files = [f for f in os.listdir(CSV_DIR) if f.endswith('.csv')]
+    print(f"📂 {len(csv_files)}개 CSV 파일 로드 중...")
+
+    for csv_file in csv_files:
+        form_number = csv_file[:-4]  # 확장자 제거
+        csv_path = os.path.join(CSV_DIR, csv_file)
+        try:
+            df = pd.read_csv(csv_path, encoding='utf-8-sig', dtype=str)
+            csv_data[form_number] = df
+            print(f"  ✓ {form_number}: {len(df)}행")
+        except Exception as e:
+            print(f"  ✗ {form_number}: 로드 실패 - {e}")
+
+    return csv_data
+
+def save_csv_data(form_number, df):
+    """특정 form_number의 DataFrame을 CSV 파일로 저장합니다"""
+    csv_path = os.path.join(CSV_DIR, f"{form_number}.csv")
+    try:
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        print(f"💾 {form_number}.csv 저장 완료")
+        return True
+    except Exception as e:
+        print(f"❌ {form_number}.csv 저장 실패: {e}")
+        return False
+
+def convert_path(server_path, form_number=None):
+    """서버 경로를 로컬 images/ 경로로 변환합니다
+
+    예: /mnt/AI_NAS/.../images/068/A0000.jpg -> images/068/A0000.jpg
+    """
+    # 방법 1: 'images/' 문자열을 기준으로 분리
+    try:
+        # 경로 구분자 통일 (\ -> /)
+        normalized_path = server_path.replace('\\', '/')
+
+        # 'images/' 뒷부분 추출
+        if 'images/' in normalized_path:
+            parts = normalized_path.split('images/')
+            local_relative_path = parts[-1]  # 마지막 'images/' 이후 부분
+            return os.path.join(IMAGE_ROOT_PATH, local_relative_path)
+    except Exception as e:
+        print(f"경로 변환 실패 (방법1): {e}")
+
+    # 방법 2: form_number와 파일명으로 조합 (fallback)
+    if form_number:
+        filename = os.path.basename(server_path)
+        return os.path.join(IMAGE_ROOT_PATH, form_number, filename)
+
+    # 최종 fallback: 원본 경로 반환
+    return server_path
 
 # --- Main Application Logic ---
-data_json = load_json(DATA_JSON_PATH)
 schema_json = load_json(SCHEMA_JSON_PATH)
-# data.json의 파일 경로가 /mnt/AI_NAS/.. 로 되어있으므로, 실제 로컬 경로에 맞게 수정합니다.
-# 예: /mnt/AI_NAS/Data/현대캐피탈/labeling/hk_1/images/NSG_044-004 (068).jpg -> images/068/NSG_044-004 (068).jpg
-def convert_path(original_path, form_number):
-    # 모든 슬래시를 언더바로 변경
-    filename = original_path.replace('/', '_')
-    return os.path.join(IMAGE_ROOT_PATH, form_number, filename)
+csv_data_frames = load_csv_data()  # {form_number: DataFrame}
 
-# data_json의 경로를 로컬 경로로 변환
-converted_data_json = copy.deepcopy(data_json)
-for form_number, form_data in converted_data_json.items():
-    new_form_data = {}
-    for path, ocr_data in form_data.items():
-        new_path = convert_path(path, form_number)
-        new_form_data[new_path] = ocr_data
-    converted_data_json[form_number] = new_form_data
+# CSV 데이터를 converted_data_json 형식으로 변환 (기존 코드와 호환성 유지)
+converted_data_json = {}
+for form_number, df in csv_data_frames.items():
+    if 'image_path' not in df.columns:
+        print(f"경고: {form_number}.csv에 image_path 컬럼이 없습니다.")
+        continue
+
+    form_data = {}
+    for _, row in df.iterrows():
+        server_path = row['image_path']
+        local_path = convert_path(server_path, form_number)
+
+        # row를 딕셔너리로 변환 (image_path 제외)
+        ocr_data = {col: row[col] for col in df.columns if col != 'image_path'}
+        form_data[local_path] = ocr_data
+
+    converted_data_json[form_number] = form_data
+
+print(f"✅ 총 {len(converted_data_json)}개 양식 로드 완료")
     
 # UI 업데이트를 위한 함수들
 def get_form_numbers():
-    """data.json에 정의되어 있고, 실제 이미지 폴더가 존재하는 form_number 목록을 반환합니다."""
-    all_forms = data_json.keys()
+    """CSV 파일과 이미지 폴더가 모두 존재하는 form_number 목록을 반환합니다."""
+    all_forms = converted_data_json.keys()
     existing_forms = [
         form for form in all_forms if os.path.isdir(os.path.join(IMAGE_ROOT_PATH, form))
     ]
@@ -251,7 +314,7 @@ def update_index_dropdown(form_number):
     return gr.Dropdown(choices=index_choices, value=index_choices[0] if index_choices else None, interactive=True)
 
 def process_image_for_display(form_number, key_number, image_path, index):
-    """이미지를 처리하여 디스플레이용 이미지 생성 (캐싱 가능한 순수 함수)"""
+    """이미지를 처리하여 디스플레이용 이미지 생성 (원본 전체 표시 + 형광펜)"""
     # schema에서 좌표 및 ocr_key 정보 가져오기
     key_info = schema_json.get(form_number, {}).get(key_number, {})
     x, y = key_info.get('x'), key_info.get('y')
@@ -260,7 +323,7 @@ def process_image_for_display(form_number, key_number, image_path, index):
     # OCR 데이터 가져오기
     ocr_value = converted_data_json.get(form_number, {}).get(image_path, {}).get(key_number, "N/A")
 
-    # 이미지 로드 및 확대/자르기
+    # 이미지 로드
     if not os.path.exists(image_path) or x is None or y is None:
         return None
 
@@ -268,95 +331,47 @@ def process_image_for_display(form_number, key_number, image_path, index):
         with Image.open(image_path) as img:
             img_w, img_h = img.size
 
+            # 원본 이미지를 그대로 사용 (크롭 없음)
+            # RGBA 모드로 변경하여 투명도 처리
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+
             # 주어진 좌표(x, y)를 실제 이미지의 픽셀 좌표로 변환
             point_x = int(x * img_w)
             point_y = int(y * img_h)
 
-            # UI에 표시될 이미지의 가로/세로 비율 (300:150 -> 2:1)
-            display_aspect_ratio = 1.5
-
-            # 확대할 영역의 크기를 설정합니다. (원본 이미지 너비의 25%를 기준으로)
-            crop_w = img_w / 3
-            crop_h = crop_w / display_aspect_ratio
-
-            # 좌표가 확대 영역의 중심이 아닌 좌상단에 위치하도록 crop box를 계산합니다.
-            margin_ratio_x = 0.20
-            margin_ratio_y = 0.50
-            left = point_x - (crop_w * margin_ratio_x)
-            top = point_y - (crop_h * margin_ratio_y)
-            right = left + crop_w
-            bottom = top + crop_h
-
-            # crop box가 이미지 경계를 벗어나지 않도록 보정 (크기 유지)
-            if left < 0:
-                delta = -left
-                left = 0
-                right += delta
-            if top < 0:
-                delta = -top
-                top = 0
-                bottom += delta
-            if right > img_w:
-                delta = right - img_w
-                right = img_w
-                left -= delta
-            if bottom > img_h:
-                delta = bottom - img_h
-                bottom = img_h
-                top -= delta
-
-            # 최종적으로 경계값 한 번 더 확인 (부동소수점 계산 오류 등 방지)
-            left = max(0, left)
-            top = max(0, top)
-            right = min(img_w, right)
-            bottom = min(img_h, bottom)
-
-            # 이미지를 잘라내기
-            cropped_img = img.crop((left, top, right, bottom))
-
-            # UI에 표시될 이미지 크기 설정
-            display_w, display_h = 1200, 800
-
-            # 잘라낸 이미지를 UI 크기로 리사이즈하여 '줌' 효과를 줌
-            zoomed_img = cropped_img.resize((display_w, display_h), Image.Resampling.LANCZOS)
-
             # --- 형광펜 효과 추가 ---
-            # RGBA 모드로 변경하여 투명도 처리
-            if zoomed_img.mode != 'RGBA':
-                zoomed_img = zoomed_img.convert('RGBA')
-
             # 형광펜으로 사용할 반투명 노란색 레이어 생성
-            highlighter_color = (245, 226, 39, 140)  # Yellow with alpha for transparency
+            highlighter_color = (245, 226, 39, 140)  # Yellow with alpha
 
             # is_checkbox에 따라 하이라이트 크기 결정
             if is_checkbox:
                 # 체크박스는 고정 크기 사용
-                highlighter_size = (100, 50)
+                highlighter_size = (16, 16)
             else:
-                # 텍스트는 렌더링 폭에 비례하여 크기 결정 (반각 5개 = 100px 기준)
-                # 반각 문자(ASCII)는 1, 전각 문자(한글 등)는 2로 계산
+                # 텍스트는 렌더링 폭에 비례하여 크기 결정
                 text_str = str(ocr_value) if ocr_value != "N/A" else "     "
                 display_width = sum(2 if ord(c) > 127 else 1 for c in text_str)
-                highlighter_width = max(20, display_width * 20)  # 최소 20px, 반각 기준 1당 20px
-                highlighter_size = (highlighter_width, 50)
+                highlighter_width = max(20, display_width * 7)
+                highlighter_size = (highlighter_width, 16)
 
-            highlighter = Image.new('RGBA', zoomed_img.size, (255, 255, 255, 0))  # Transparent layer
+            highlighter = Image.new('RGBA', img.size, (255, 255, 255, 0))  # Transparent layer
             draw = ImageDraw.Draw(highlighter)
 
-            # 원본 이미지의 (x,y) 좌표를 잘라낸 이미지 내의 상대 좌표로 변환
-            relative_x = point_x - left
-            relative_y = point_y - top
+            # 형광펜 그리기 (원본 좌표 그대로 사용)
+            draw.rectangle(
+                [point_x,
+                 point_y,
+                 point_x + highlighter_size[0],
+                 point_y + highlighter_size[1]
+                 ],
+                 fill=highlighter_color
+                 )
 
-            # 잘라낸 이미지가 UI 표시용으로 리사이즈된 비율을 계산하여 최종 좌표 계산
-            scale_w = display_w / cropped_img.width
-            scale_h = display_h / cropped_img.height
-            marker_x = int(relative_x * scale_w)
-            marker_y = int(relative_y * scale_h)
-            draw.rectangle([marker_x, marker_y - (0.7 * highlighter_size[1]), marker_x + highlighter_size[0],
-                          marker_y + (0.3 * highlighter_size[1])], fill=highlighter_color)
-            zoomed_img = Image.alpha_composite(zoomed_img, highlighter)
+            # 형광펜 레이어와 원본 이미지 합성
+            result_img = Image.alpha_composite(img, highlighter)
 
-            return zoomed_img
+            return result_img
     except Exception as e:
         print(f"이미지 처리 실패: {e}")
         return None
@@ -368,12 +383,12 @@ def update_view(form_number, key_number, current_index, state_data):
     image_cache.check_schema_changed()
 
     if not form_number or not key_number:
-        return None, "양식과 키를 선택하세요.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return state_data, None, "양식과 키를 선택하세요.", "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     # 현재 form_number에 해당하는 이미지 파일 목록 가져오기
     image_files = list(converted_data_json.get(form_number, {}).keys())
     if not image_files:
-        return None, "이미지 파일이 없습니다.", state_data, "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return state_data, None, "이미지 파일이 없습니다.", "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     total_images = len(image_files)
     # index 보정
@@ -412,9 +427,9 @@ def update_view(form_number, key_number, current_index, state_data):
     total_keys = len(key_numbers)
 
     if total_images > 0:
-        status_text = f"Key: {current_key_index + 1}/{total_keys}      |      Index: {current_index + 1}/{total_images}"
+        status_text = f"Key: {current_key_index + 1}/{total_keys} | Index: {current_index + 1}/{total_images}"
     else:
-        status_text = "Key: 0/0      |      Index: 0/0"
+        status_text = "Key: 0/0 | Index: 0/0"
     filename = os.path.basename(image_path)
 
     # is_checkbox 값에 따라 UI 컴포넌트 가시성 조절
@@ -451,16 +466,17 @@ def update_view(form_number, key_number, current_index, state_data):
             prev_key_interactive = current_key_index > 0
             next_key_interactive = current_key_index < len(key_numbers) - 1
 
-            # index_dd 업데이트
+            # index_dd 업데이트 (choices와 value 모두 설정)
+            index_choices = [f"{i+1}/{total_images}" for i in range(total_images)]
             index_dd_value = f"{current_index + 1}/{total_images}"
 
-            return zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive), gr.update(value=index_dd_value), gr.update(interactive=prev_key_interactive), gr.update(interactive=next_key_interactive)
+            return state_data, zoomed_img, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, gr.update(interactive=prev_btn_interactive), gr.update(interactive=next_btn_interactive), gr.update(choices=index_choices, value=index_dd_value), gr.update(interactive=prev_key_interactive), gr.update(interactive=next_key_interactive)
 
-    return None, state_data, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
+    return state_data, None, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
 def change_image(state_data, direction):
     if not state_data:
-        return None, state_data, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return state_data, None, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     current_index = state_data["current_index"]
     total_images = len(state_data["image_files"])
@@ -508,44 +524,136 @@ def change_form(state_data, direction):
 
     return gr.Dropdown(value=new_form)
 
+def determine_empty_value_symbol(df, key_number, form_number):
+    """
+    DataFrame의 특정 컬럼을 스캔하여 빈 값으로 저장할 기호를 결정합니다.
+    기호가 없으면 메모장으로 해당 CSV 파일을 엽니다.
+
+    Args:
+        df: 검사할 pandas DataFrame
+        key_number: 스캔할 컬럼명
+        form_number: CSV 파일 이름 (확장자 제외)
+
+    Returns:
+        '∅', '␣' 중 하나를 반환합니다. 발견되지 않으면 None을 반환합니다.
+    """
+    if key_number not in df.columns:
+        print(f"⚠️ 경고: '{key_number}' 컬럼이 DataFrame에 없습니다.")
+        return None
+
+    # NaN 값을 제외하고, 모든 값을 문자열로 변환한 뒤 고유한 값들의 집합(set)을 생성
+    # set을 사용하면 값 존재 여부 확인 시 성능상 이점이 있습니다. (평균 O(1))
+    unique_values = set(df[key_number].dropna().astype(str).unique())
+
+    has_empty_set = '∅' in unique_values
+    has_blank = '␣' in unique_values
+
+    # 1. 둘 다 있는 경우 → notepad로 CSV 열기
+    if has_empty_set and has_blank:
+        print(f"⚠️ '{key_number}' 컬럼에 '∅'와 '␣'가 모두 존재합니다.")
+        # notepad 열기 (아래 로직과 동일하게 처리)
+        csv_path = os.path.join(CSV_DIR, f"{form_number}.csv")
+        try:
+            import subprocess
+            print(f"📝 메모장으로 {form_number}.csv 파일을 엽니다. 적절한 공란 기호를 확인하세요.")
+            subprocess.Popen(['notepad.exe', csv_path])
+        except FileNotFoundError:
+            print(f"❌ 파일 열기 실패: '{csv_path}' 경로에 파일이 없습니다.")
+        except Exception as e:
+            print(f"❌ 예상치 못한 오류로 파일 열기에 실패했습니다: {e}")
+        return None
+
+    # 2. '∅'만 발견되면 '∅' 반환
+    if has_empty_set:
+        return '∅'
+
+    # 3. '␣'만 발견되면 '␣' 반환
+    if has_blank:
+        return '␣'
+
+    # 3. 둘 다 발견되지 않으면 notepad로 CSV 열기
+    csv_path = os.path.join(CSV_DIR, f"{form_number}.csv")
+    print(f"👉 '{key_number}' 컬럼에서 공란 기호('∅', '␣')를 찾을 수 없습니다.")
+
+    try:
+        # os.startfile 대신 subprocess.Popen으로 명시적으로 notepad.exe 실행
+        # 이는 파일 연결 상태와 무관하게 항상 메모장에서 열리도록 보장합니다.
+        import subprocess
+        print(f"📝 메모장으로 {form_number}.csv 파일을 엽니다. 적절한 공란 기호를 확인하세요.")
+        subprocess.Popen(['notepad.exe', csv_path])
+    except FileNotFoundError:
+        print(f"❌ 파일 열기 실패: '{csv_path}' 경로에 파일이 없습니다.")
+    except Exception as e:
+        print(f"❌ 예상치 못한 오류로 파일 열기에 실패했습니다: {e}")
+
+    return None
+
 def save_data(text_value, radio_value, state_data, request: gr.Request):
+    """데이터를 CSV 파일에 직접 저장합니다"""
     if not state_data:
         return "저장할 데이터가 없습니다.", gr.update()
 
     key_info = schema_json.get(state_data["form_number"], {}).get(state_data["key_number"], {})
     is_checkbox = key_info.get('checkbox', False)
 
+    form_number = state_data["form_number"]
+    local_image_path = state_data["image_path"]
+    key_number = state_data["key_number"]
+
+    # DataFrame 가져오기
+    if form_number not in csv_data_frames:
+        return f"오류: {form_number}.csv 파일을 찾을 수 없습니다.", gr.update()
+
+    df = csv_data_frames[form_number]
+
     if is_checkbox:
         new_value = radio_value
     else:
-        # 텍스트 입력값이 비어있거나 공백만 있으면 "␣"로 대체
-        new_value = text_value if text_value and text_value.strip() else "␣"
+        # 텍스트 입력값이 비어있거나 공백만 있으면 스마트하게 기호 결정
+        if text_value and text_value.strip():
+            new_value = text_value
+        else:
+            # CSV 컬럼을 스캔하여 적절한 공란 기호 결정
+            empty_symbol = determine_empty_value_symbol(df, key_number, form_number)
+            if empty_symbol is None:
+                return "⚠️ CSV 파일을 열었습니다. 적절한 공란 기호('∅' 또는 '␣')를 확인한 후 다시 저장하세요.", gr.update()
+            new_value = empty_symbol
 
-    form_number = state_data["form_number"]
-    image_path = state_data["image_path"]
-    key_number = state_data["key_number"]
+    # local_image_path에서 서버 경로 역변환
+    # 예: images/068/A0000.jpg -> /mnt/AI_NAS/.../images/068/A0000.jpg
+    # 'images/' 이후 부분을 추출
+    try:
+        normalized_local = local_image_path.replace('\\', '/')
+        if 'images/' in normalized_local:
+            relative_part = normalized_local.split('images/')[-1]  # '068/A0000.jpg'
+        else:
+            relative_part = '/'.join(normalized_local.split('/')[-2:])  # fallback
 
-    # 원본 data.json의 경로를 찾아 업데이트
-    original_path = None
-    converted_basename = os.path.basename(image_path)
-    for path in data_json[form_number]:
-        if path.replace('/', '_') == converted_basename:
-            original_path = path
-            break
-    
-    if original_path:
-        # data.json과 converted_data_json 모두 업데이트
-        data_json[form_number][original_path][key_number] = new_value
-        converted_data_json[form_number][image_path][key_number] = new_value
-        
-        save_json(DATA_JSON_PATH, data_json)
-        
-        # UI 업데이트: 저장된 값을 ocr_textbox에 반영
-        if not is_checkbox and new_value == "␣":
-            return f"'{new_value}' (으)로 저장 완료!", gr.update(value=new_value)
-        return f"'{new_value}' (으)로 저장 완료!", gr.update()
-    
-    return "오류: 원본 파일 경로를 찾을 수 없습니다.", gr.update()
+        # DataFrame에서 해당 경로를 포함하는 행 찾기
+        # CSV의 image_path는 전체 절대 경로이므로, 끝부분이 일치하는 행을 찾음
+        matching_rows = df[df['image_path'].str.endswith(relative_part)]
+
+        if matching_rows.empty:
+            return f"오류: CSV에서 경로를 찾을 수 없습니다: {relative_part}", gr.update()
+
+        # DataFrame 업데이트
+        row_index = matching_rows.index[0]
+        df.loc[row_index, key_number] = new_value
+
+        # converted_data_json도 업데이트 (UI 동기화)
+        converted_data_json[form_number][local_image_path][key_number] = new_value
+
+        # CSV 파일에 즉시 저장
+        if save_csv_data(form_number, df):
+            # UI 업데이트: 저장된 값을 ocr_textbox에 반영
+            if not is_checkbox and (new_value == "␣" or new_value == "∅"):
+                return f"'{new_value}' (으)로 저장 완료!", gr.update(value=new_value)
+            return f"'{new_value}' (으)로 저장 완료!", gr.update()
+        else:
+            return "오류: CSV 파일 저장 실패", gr.update()
+
+    except Exception as e:
+        return f"오류: 경로 변환 실패 - {e}", gr.update()
 
 
 def open_image_file(state_data):
@@ -553,6 +661,41 @@ def open_image_file(state_data):
         image_path = state_data["image_path"]
         if os.path.exists(image_path):
             os.startfile(os.path.abspath(image_path))
+
+def export_current_csv(state_data):
+    """현재 작업 중인 CSV를 EXTRACT 폴더에 복사하고 폴더를 엽니다"""
+    if not state_data or "form_number" not in state_data:
+        return "⚠️ 작업 중인 CSV가 없습니다."
+
+    form_number = state_data["form_number"]
+
+    if form_number not in csv_data_frames:
+        return f"❌ {form_number}.csv 파일을 찾을 수 없습니다."
+
+    # EXTRACT 폴더 생성
+    os.makedirs(EXTRACT_DIR, exist_ok=True)
+
+    # 원본 CSV 경로
+    source_csv = os.path.join(CSV_DIR, f"{form_number}.csv")
+    # 대상 CSV 경로
+    dest_csv = os.path.join(EXTRACT_DIR, f"{form_number}.csv")
+
+    try:
+        # CSV 파일 복사
+        import shutil
+        shutil.copy2(source_csv, dest_csv)
+
+        # EXTRACT 폴더를 explorer로 열기
+        import subprocess
+        subprocess.Popen(['explorer', os.path.abspath(EXTRACT_DIR)])
+
+        print(f"📤 {form_number}.csv를 EXTRACT 폴더로 내보냈습니다.")
+        return f"✅ '{form_number}.csv' 내보내기 완료!\nEXTRACT 폴더가 열렸습니다."
+
+    except FileNotFoundError:
+        return f"❌ {source_csv} 파일을 찾을 수 없습니다."
+    except Exception as e:
+        return f"❌ 내보내기 실패: {e}"
 
 # --- Gradio UI ---
 js_keyboard_shortcuts = """
@@ -593,73 +736,94 @@ js_keyboard_shortcuts = """
 }
 """
 
-with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_shortcuts) as demo:
+with gr.Blocks(title="OCR 데이터 검수 도구", js=js_keyboard_shortcuts) as demo:
     # 상태 저장을 위한 변수
     state = gr.State({})
-    gr.Markdown("## OCR 데이터 검수 및 수정 도구")
+
+    # gr.Markdown("# OCR 데이터 검수 및 수정 도구")
 
     # 이전 세션 정보 표시
     cached_state = cache_manager.get_state()
     if cached_state.get("form_number") and cached_state.get("key_number"):
-        cache_info = f"**📌 이전 작업 지점**: Form `{cached_state['form_number']}`, Key `{cached_state['key_number']}`, Index `{cached_state['current_index']+1}`"
+        cache_info = f"**📌 이전 작업**: Form `{cached_state['form_number']}`, Key `{cached_state['key_number']}`, Index `{cached_state.get('current_index', 0)+1}`"
     else:
-        cache_info = "**ℹ️ 새로운 세션**: 이전 작업 내역이 없습니다."
-    gr.Markdown(cache_info)
+        cache_info = "**ℹ️ 새로운 세션**"
+    
 
     with gr.Row():
+        # 좌측: 컴팩트 컨트롤 패널
         with gr.Column(scale=1):
-
-            with gr.Row():
-                form_number_dd = gr.Dropdown(choices=get_form_numbers(), label="Form Number")
-                key_number_dd = gr.Dropdown(label="Key Number", interactive=False)
-                index_dd = gr.Dropdown(label="Index", interactive=False)
-
-            with gr.Row(elem_id="filename_row"):
-                filename_textbox = gr.Textbox(label="Current Filename", interactive=False)
-                open_file_btn = gr.Button("파일 열기", scale=0)
-            ocr_key_textbox = gr.Textbox(label="OCR Key", interactive=False)
-            is_checkbox_textbox = gr.Textbox(label="is_checkbox", interactive=False)
+            gr.Markdown(cache_info)
+            status_label = gr.Label(value="0 / 0", label="진행 상태")
 
             with gr.Group():
+                gr.Markdown("### 데이터 선택")
+                with gr.Row():
+                    form_number_dd = gr.Dropdown(choices=get_form_numbers(), label="Form Number", interactive=True)
+                    key_number_dd = gr.Dropdown(label="Key Number", interactive=True)
+                    index_dd = gr.Dropdown(label="Index", interactive=True)
+                # Index 고정 기능을 항상 활성화 (체크박스는 숨김)
+                fix_index_checkbox = gr.Checkbox(label="Index 고정", value=True, visible=False)
+
+            with gr.Group():
+                gr.Markdown("### 파일 정보")
+                with gr.Row():
+                    filename_textbox = gr.Textbox(label="Filename", interactive=False)
+                    is_checkbox_textbox = gr.Textbox(label="Type", interactive=False)
+                ocr_key_textbox = gr.Textbox(label="OCR Key", interactive=False)
+                open_file_btn = gr.Button("📂 파일 열기", size="sm")
+
+            with gr.Group():
+                gr.Markdown("### 데이터 입력")
                 ocr_textbox = gr.Textbox(label="OCR 값", interactive=True, visible=True)
                 checkbox_radio = gr.Radio(["✘", "✔"], label="OCR 값", visible=False, interactive=True)
+                save_status = gr.Textbox(label="저장 상태", interactive=False, show_label=False)
+                save_btn = gr.Button("💾 저장 (Enter)", elem_id="save_button", variant="primary")
 
-            with gr.Row():
-                save_btn = gr.Button("저장", elem_id="save_button")
-                save_status = gr.Textbox(label="저장 상태", interactive=False)
+            with gr.Group():
+                gr.Markdown("### 네비게이션")
+                with gr.Row():
+                    prev_btn = gr.Button("← 이전", elem_id="prev_button", scale=1)
+                    next_btn = gr.Button("다음 →", elem_id="next_button", scale=1)
+                
+                    prev_key_button = gr.Button("↑ 이전 Key", elem_id="prev_key_button", scale=1)
+                    next_key_button = gr.Button("↓ 다음 Key", elem_id="next_key_button", scale=1)
+                
+                    prev_form_button = gr.Button("⇞ 이전 Form", elem_id="prev_form_button", scale=1)
+                    next_form_button = gr.Button("⇟ 다음 Form", elem_id="next_form_button", scale=1)
 
-            with gr.Row():
-                prev_btn = gr.Button("이전 (←)", visible=True, elem_id="prev_button")
-                next_btn = gr.Button("다음 (→)", visible=True, elem_id="next_button")
-                prev_key_button = gr.Button("이전 Key (↑)", elem_id="prev_key_button")
-                next_key_button = gr.Button("다음 Key (↓)", elem_id="next_key_button")
-            
-            with gr.Row():
-                prev_form_button = gr.Button("이전 Form (PageUp)", elem_id="prev_form_button")
-                next_form_button = gr.Button("다음 Form (PageDown)", elem_id="next_form_button")
+            with gr.Group():
+                gr.Markdown("### 기타")
+                export_btn = gr.Button("📤 CSV 내보내기", variant="secondary")
+                export_status = gr.Textbox(label="내보내기 상태", interactive=False, show_label=False)
 
-        with gr.Column(scale=1):
-            status_label = gr.Label(value="0 / 0", label="진행 상태", elem_id="status_label")
-            image_display = gr.Image(label="이미지", type="pil")
+        # 우측: 세로로 긴 이미지 뷰어 (A4 비율 1:1.414)
+        with gr.Column(scale=1.2):
+            image_display = gr.Image(label="이미지 뷰어", type="pil", height=1200, show_download_button=True)
 
     # --- Event Listeners ---
-    outputs_list = [image_display, state, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio, prev_btn, next_btn, index_dd, prev_key_button, next_key_button]
+    # state를 맨 앞에 배치하여 먼저 업데이트되도록 함 (빠른 키 입력 시 동기화 문제 방지)
+    outputs_list = [state, image_display, status_label, filename_textbox, ocr_key_textbox, is_checkbox_textbox, ocr_textbox, checkbox_radio, prev_btn, next_btn, index_dd, prev_key_button, next_key_button]
 
+    # form 변경 시: dropdown만 업데이트 (뷰는 업데이트하지 않음)
     form_number_dd.change(
-        fn=lambda form: (update_key_dropdown(form), update_index_dropdown(form)),
+        fn=lambda form: update_key_dropdown(form),
         inputs=[form_number_dd],
-        outputs=[key_number_dd, index_dd]
+        outputs=[key_number_dd]
     )
-    
-    # form 또는 key가 변경되면 뷰를 업데이트
-    form_number_dd.change(
-        fn=lambda form, key, state: update_view(form, key, 0, state),
-        inputs=[form_number_dd, key_number_dd, state],
-        outputs=outputs_list
-    )
+
+    # key 변경 시: Index 고정이 활성화되어 있으므로 항상 현재 index 유지
+    def on_key_change(form, key, fix_index, state):
+        if fix_index and state and "current_index" in state:
+            # Index 고정: 현재 index 유지
+            return update_view(form, key, state["current_index"], state)
+        else:
+            # Index 고정 해제: index를 0으로 리셋
+            return update_view(form, key, 0, state)
+
     key_number_dd.change(
-        fn=lambda form, key, state: update_view(form, key, 0, state),
-        inputs=[form_number_dd, key_number_dd, state],
+        fn=on_key_change,
+        inputs=[form_number_dd, key_number_dd, fix_index_checkbox, state],
         outputs=outputs_list
     )
     
@@ -710,6 +874,13 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         outputs=[form_number_dd]
     )
 
+    # 내보내기 버튼 클릭 이벤트
+    export_btn.click(
+        fn=export_current_csv,
+        inputs=[state],
+        outputs=[export_status]
+    )
+
     # index_dd 변경 시 해당 인덱스로 이동
     def on_index_change(index_str, state):
         if not index_str or not state:
@@ -727,76 +898,62 @@ with gr.Blocks(title="Image Coordinate Labeler (Excel column)", js=js_keyboard_s
         outputs=outputs_list
     )
 
-    # --- App Load Event ---
-    def on_load(state):
-        # CacheManager에서 저장된 상태 로드
+    # --- App Load Event (cache에서 전체 상태 로드) ---
+    def on_load_full():
+        """cache에서 form_number만 불러오기 (나머지는 순차적으로 로드)"""
         cache = cache_manager.get_state()
         form_number = cache.get("form_number")
-        key_number = cache.get("key_number")
-        current_index = cache.get("current_index", 0)
 
         all_forms = get_form_numbers()
         if not form_number or form_number not in all_forms:
-            form_number = all_forms[0] if all_forms else None # 필터링된 목록에 없으면 첫번째 항목으로 초기화
-            key_number = None # Reset key if form is reset
-            current_index = 0
+            form_number = all_forms[0] if all_forms else None
 
-        key_dd_update = update_key_dropdown(form_number)
-        
-        all_keys = key_dd_update.choices
-        if not key_number or key_number not in all_keys:
+        return form_number
+
+    def on_load_step2(form_number):
+        """form_number 설정 후 key_number를 cache에서 불러오기"""
+        if not form_number:
+            return gr.Dropdown(choices=[], value=None, interactive=False)
+
+        cache = cache_manager.get_state()
+        cached_key = cache.get("key_number")
+
+        all_keys = list(schema_json.get(form_number, {}).keys())
+
+        # cached key가 유효하면 사용, 아니면 첫 번째 key
+        if cached_key and cached_key in all_keys:
+            key_number = cached_key
+        else:
             key_number = all_keys[0] if all_keys else None
-        
-        key_dd_update.value = key_number # Set the final key value
 
-        # update_view will be called with the cached/default values
-        view_outputs = update_view(form_number, key_number, current_index, state)
+        return gr.Dropdown(choices=all_keys, value=key_number, interactive=True)
 
-        # view_outputs is: zoomed_img, state_data, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update, index_dd_update, prev_key_btn_update, next_key_btn_update
-        zoomed_img, updated_state, status_text, filename, ocr_key_value, is_checkbox, ocr_textbox_update, checkbox_radio_update, prev_btn_update, next_btn_update, index_dd_update, prev_key_btn_update, next_key_btn_update = view_outputs
+    def on_load_step3(form_number, key_number, state):
+        """key_number 설정 후 view를 cache의 index로 업데이트"""
+        if not form_number or not key_number:
+            return [state] + [gr.update() for _ in range(len(outputs_list) - 1)]
 
-        # The return tuple must match the order of the 'load_outputs' list
-        return (
-            form_number,
-            key_dd_update,
-            zoomed_img,
-            updated_state,
-            status_text,
-            filename,
-            ocr_key_value,
-            is_checkbox,
-            ocr_textbox_update,
-            checkbox_radio_update,
-            prev_btn_update,
-            next_btn_update,
-            index_dd_update,
-            prev_key_btn_update,
-            next_key_btn_update
-        )
+        cache = cache_manager.get_state()
+        current_index = cache.get("current_index", 0)
 
-    # Define all components that will be updated by the load event
-    load_outputs = [
-        form_number_dd,
-        key_number_dd,
-        image_display,
-        state,
-        status_label,
-        filename_textbox,
-        ocr_key_textbox,
-        is_checkbox_textbox,
-        ocr_textbox,
-        checkbox_radio,
-        prev_btn,
-        next_btn,
-        index_dd,
-        prev_key_button,
-        next_key_button
-    ]
-    
-    demo.load(
-        fn=on_load,
-        inputs=[state],
-        outputs=load_outputs
+        # cache에서 불러온 index로 view 업데이트
+        return update_view(form_number, key_number, current_index, state)
+
+    # 순차적 로드: form → key → view (모두 cache에서)
+    load_event = demo.load(
+        fn=on_load_full,
+        inputs=None,
+        outputs=[form_number_dd]
+    )
+
+    load_event.then(
+        fn=on_load_step2,
+        inputs=[form_number_dd],
+        outputs=[key_number_dd]
+    ).then(
+        fn=on_load_step3,
+        inputs=[form_number_dd, key_number_dd, state],
+        outputs=outputs_list
     )
 
 
