@@ -691,7 +691,7 @@ def determine_empty_value_symbol(df, key_number, form_number):
 def save_data(text_value, radio_value, state_data, request: gr.Request):
     """데이터를 CSV 파일에 직접 저장합니다"""
     if not state_data:
-        return "저장할 데이터가 없습니다.", gr.update()
+        return "저장할 데이터가 없습니다.", gr.update(), state_data
 
     key_info = schema_json.get(state_data["form_number"], {}).get(state_data["key_number"], {})
     is_checkbox = key_info.get('checkbox', False)
@@ -699,10 +699,11 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
     form_number = state_data["form_number"]
     local_image_path = state_data["image_path"]
     key_number = state_data["key_number"]
+    current_index = state_data.get("current_index", 0)
 
     # DataFrame 가져오기
     if form_number not in csv_data_frames:
-        return f"오류: {form_number}.csv 파일을 찾을 수 없습니다.", gr.update()
+        return f"오류: {form_number}.csv 파일을 찾을 수 없습니다.", gr.update(), state_data
 
     df = csv_data_frames[form_number]
 
@@ -716,7 +717,7 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
             # CSV 컬럼을 스캔하여 적절한 공란 기호 결정
             empty_symbol = determine_empty_value_symbol(df, key_number, form_number)
             if empty_symbol is None:
-                return "⚠️ CSV 파일을 열었습니다. 적절한 공란 기호('∅' 또는 '␣')를 확인한 후 다시 저장하세요.", gr.update()
+                return "⚠️ CSV 파일을 열었습니다. 적절한 공란 기호('∅' 또는 '␣')를 확인한 후 다시 저장하세요.", gr.update(), state_data
             new_value = empty_symbol
 
     # local_image_path에서 서버 경로 역변환
@@ -734,7 +735,7 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
         matching_rows = df[df['image_path'].str.endswith(relative_part)]
 
         if matching_rows.empty:
-            return f"오류: CSV에서 경로를 찾을 수 없습니다: {relative_part}", gr.update()
+            return f"오류: CSV에서 경로를 찾을 수 없습니다: {relative_part}", gr.update(), state_data
 
         # DataFrame 업데이트
         row_index = matching_rows.index[0]
@@ -745,15 +746,33 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
 
         # CSV 파일에 즉시 저장
         if save_csv_data(form_number, df):
+            # === 캐시 무효화: 현재 이미지 캐시 삭제 ===
+            cache_key = image_cache._get_cache_key(form_number, key_number, local_image_path, current_index)
+
+            # 메모리 캐시에서 삭제
+            with image_cache.cache_lock:
+                if cache_key in image_cache.memory_cache:
+                    del image_cache.memory_cache[cache_key]
+                    print(f"🗑️ 메모리 캐시 삭제: {cache_key}")
+
+            # 디스크 캐시에서 삭제
+            disk_path = image_cache._get_disk_cache_path(cache_key)
+            if os.path.exists(disk_path):
+                try:
+                    os.remove(disk_path)
+                    print(f"🗑️ 디스크 캐시 삭제: {disk_path}")
+                except Exception as e:
+                    print(f"⚠️ 디스크 캐시 삭제 실패: {e}")
+
             # UI 업데이트: 저장된 값을 ocr_textbox에 반영
             if not is_checkbox and (new_value == "␣" or new_value == "∅"):
-                return f"'{new_value}' (으)로 저장 완료!", gr.update(value=new_value)
-            return f"'{new_value}' (으)로 저장 완료!", gr.update()
+                return f"'{new_value}' (으)로 저장 완료! (캐시 갱신됨)", gr.update(value=new_value), state_data
+            return f"'{new_value}' (으)로 저장 완료! (캐시 갱신됨)", gr.update(), state_data
         else:
-            return "오류: CSV 파일 저장 실패", gr.update()
+            return "오류: CSV 파일 저장 실패", gr.update(), state_data
 
     except Exception as e:
-        return f"오류: 경로 변환 실패 - {e}", gr.update()
+        return f"오류: 경로 변환 실패 - {e}", gr.update(), state_data
 
 
 def open_image_file(state_data):
@@ -880,6 +899,88 @@ js_keyboard_shortcuts = """
         return key;
     };
 
+    // ===== OCR 텍스트박스 자동 전체 선택 기능 =====
+    const setupOcrTextboxAutoSelect = () => {
+        // OCR 값 레이블을 가진 텍스트박스 찾기
+        const findOcrTextbox = () => {
+            const labels = Array.from(document.querySelectorAll('label'));
+            for (const label of labels) {
+                if (label.textContent.trim() === 'OCR 값') {
+                    // Radio 버튼이 아닌 일반 텍스트 입력만
+                    const container = label.closest('.block, .form, [class*="wrap"]');
+                    if (container) {
+                        const input = container.querySelector('input[type="text"], textarea');
+                        // Radio 버튼 그룹 제외
+                        if (input && !input.closest('[role="radiogroup"]')) {
+                            return input;
+                        }
+                    }
+                }
+            }
+            return null;
+        };
+
+        const attachSelectAllListener = () => {
+            const ocrInput = findOcrTextbox();
+            if (ocrInput && !ocrInput.dataset.selectAllAttached) {
+                let hasBeenFocused = false;
+
+                ocrInput.addEventListener('focus', (e) => {
+                    if (!hasBeenFocused) {
+                        // 약간의 지연 후 전체 선택 (Gradio 처리 완료 대기)
+                        setTimeout(() => {
+                            e.target.select();
+                            console.log('✅ OCR 텍스트 자동 선택 완료');
+                        }, 10);
+                    }
+                    hasBeenFocused = true;
+                });
+
+                ocrInput.addEventListener('blur', () => {
+                    hasBeenFocused = false;
+                });
+
+                ocrInput.dataset.selectAllAttached = 'true';
+                console.log('✅ OCR 텍스트박스 자동 선택 기능 활성화');
+            }
+        };
+
+        // MutationObserver로 동적 생성 감지
+        const observer = new MutationObserver(() => {
+            attachSelectAllListener();
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        // 초기 설정
+        attachSelectAllListener();
+    };
+
+    // ===== 저장 버튼 클릭 후 포커스 해제 =====
+    const setupSaveButtonBlur = () => {
+        const saveButton = document.getElementById('save_button');
+        if (saveButton && !saveButton.dataset.blurAttached) {
+            saveButton.addEventListener('click', () => {
+                // 현재 포커스된 요소에서 포커스 제거
+                if (document.activeElement) {
+                    document.activeElement.blur();
+                    console.log('✅ 저장 후 포커스 해제 완료');
+                }
+            });
+            saveButton.dataset.blurAttached = 'true';
+            console.log('✅ 저장 버튼 포커스 해제 기능 활성화');
+        }
+    };
+
+    // 초기화 함수 실행
+    setTimeout(() => {
+        setupOcrTextboxAutoSelect();
+        setupSaveButtonBlur();
+    }, 1000); // Gradio UI 로드 대기
+
     // 키보드 단축키
     document.addEventListener('keydown', (e) => {
         // 텍스트 입력창에 포커스가 있을 때
@@ -920,8 +1021,6 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
     # 상태 저장을 위한 변수
     state = gr.State({})
 
-    # gr.Markdown("# OCR 데이터 검수 및 수정 도구")
-
     # 이전 세션 정보 표시
     cached_state = cache_manager.get_state()
     if cached_state.get("form_number") and cached_state.get("key_number"):
@@ -937,6 +1036,7 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
     with gr.Row():
         # 좌측: 컴팩트 컨트롤 패널
         with gr.Column(scale=1):
+            gr.Markdown("# OCR 데이터 검수 및 수정 도구")
             gr.Markdown(cache_info)
             status_label = gr.Label(value="0 / 0", label="진행 상태")
 
@@ -1040,11 +1140,15 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
         outputs=outputs_list
     )
 
-    # 저장 버튼 클릭 이벤트
+    # 저장 버튼 클릭 이벤트 (저장 후 이미지 뷰 갱신)
     save_btn.click(
         fn=save_data,
         inputs=[ocr_textbox, checkbox_radio, state, ],
-        outputs=[save_status, ocr_textbox]
+        outputs=[save_status, ocr_textbox, state]
+    ).then(
+        fn=lambda s: update_view(s["form_number"], s["key_number"], s["current_index"], s) if s else ([s] + [gr.update() for _ in range(len(outputs_list) - 1)]),
+        inputs=[state],
+        outputs=outputs_list
     )
 
     open_file_btn.click(
