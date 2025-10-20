@@ -1035,7 +1035,7 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
 
     with gr.Row():
         # 좌측: 컴팩트 컨트롤 패널
-        with gr.Column(scale=1):
+        with gr.Column(scale=5):
             gr.Markdown("# OCR 데이터 검수 및 수정 도구")
             gr.Markdown(cache_info)
             status_label = gr.Label(value="0 / 0", label="진행 상태")
@@ -1081,7 +1081,7 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
                 export_status = gr.Textbox(label="내보내기 상태", interactive=False, show_label=False)
 
         # 우측: 세로로 긴 이미지 뷰어 (A4 비율 1:1.414)
-        with gr.Column(scale=1.2):
+        with gr.Column(scale=6):
             image_display = gr.HTML(label="이미지 뷰어 (클릭 가능)")
 
     # --- Event Listeners ---
