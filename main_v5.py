@@ -804,11 +804,11 @@ def export_current_csv(state_data):
         import shutil
         shutil.copy2(source_csv, dest_csv)
 
-        import subprocess
-        subprocess.Popen(['explorer', os.path.abspath(EXTRACT_DIR)])
+        # import subprocess
+        # subprocess.Popen(['explorer', os.path.abspath(EXTRACT_DIR)])
 
         print(f"📤 {form_number}.csv를 EXTRACT 폴더로 내보냈습니다.")
-        return f"✅ '{form_number}.csv' 내보내기 완료!\nEXTRACT 폴더가 열렸습니다."
+        return f"✅ '{form_number}.csv' 내보내기 완료!"
 
     except FileNotFoundError:
         return f"❌ {source_csv} 파일을 찾을 수 없습니다."
