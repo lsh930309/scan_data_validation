@@ -45,17 +45,17 @@ class HybridImageCache:
         with open(filepath, 'rb') as f:
             return hashlib.md5(f.read()).hexdigest()
 
-    def _get_cache_key(self, form_number, key_number, image_path, index):
-        """캐시 키 생성"""
-        return f"{form_number}_{key_number}_{index}_{os.path.basename(image_path)}"
+    def _get_cache_key(self, form_number, image_path, index):
+        """캐시 키 생성 (key_number 제외)"""
+        return f"{form_number}_{index}_{os.path.basename(image_path)}"
 
     def _get_disk_cache_path(self, cache_key):
         """디스크 캐시 파일 경로 생성"""
         return os.path.join(DISK_CACHE_PATH, f"{cache_key}.png")
 
-    def get(self, form_number, key_number, image_path, index):
+    def get(self, form_number, image_path, index):
         """캐시에서 이미지 가져오기 (메모리 -> 디스크 순서)"""
-        cache_key = self._get_cache_key(form_number, key_number, image_path, index)
+        cache_key = self._get_cache_key(form_number, image_path, index)
 
         # 1. 메모리 캐시 확인
         with self.cache_lock:
@@ -84,9 +84,9 @@ class HybridImageCache:
 
         return None
 
-    def put(self, form_number, key_number, image_path, index, image):
+    def put(self, form_number, image_path, index, image):
         """이미지를 캐시에 저장 (메모리 + 디스크)"""
-        cache_key = self._get_cache_key(form_number, key_number, image_path, index)
+        cache_key = self._get_cache_key(form_number, image_path, index)
 
         # 메모리 캐시에 추가
         self._add_to_memory_cache(cache_key, image)
@@ -118,7 +118,7 @@ class HybridImageCache:
         except Exception as e:
             print(f"디스크 캐시 저장 실패: {e}")
 
-    def preload_images(self, form_number, key_number, image_files, current_index):
+    def preload_images(self, form_number, image_files, current_index):
         """현재 인덱스 주변 이미지들을 백그라운드에서 프리로드"""
         # 기존 프리로드 작업 취소 (새로운 작업으로 교체)
         if self.current_preload_task:
@@ -138,7 +138,7 @@ class HybridImageCache:
                     return
 
                 image_path = image_files[idx]
-                cache_key = self._get_cache_key(form_number, key_number, image_path, idx)
+                cache_key = self._get_cache_key(form_number, image_path, idx)
 
                 # 이미 캐시에 있으면 스킵
                 with self.cache_lock:
@@ -150,12 +150,15 @@ class HybridImageCache:
                     continue
 
                 # 이미지 생성 및 캐시
+                # process_image_for_display는 key_number가 필요하지만,
+                # 모든 키를 한 번에 그리므로 임의의 key_number를 넘김
                 try:
+                    # key_number는 실제로 영향을 주지 않으므로 None 또는 빈 문자열 전달
                     processed_img = process_image_for_display(
-                        form_number, key_number, image_path, idx
+                        form_number, None, image_path, idx
                     )
                     if processed_img and self.current_preload_task == task_id:
-                        self.put(form_number, key_number, image_path, idx, processed_img)
+                        self.put(form_number, image_path, idx, processed_img)
                 except Exception as e:
                     print(f"프리로드 실패 (idx={idx}): {e}")
 
@@ -173,12 +176,13 @@ class HybridImageCache:
         return False
 
     def clear_all_cache(self):
-        """모든 캐시 삭제"""
-        # 메모리 캐시 삭제
+        """모든 캐시 삭제 (스레드 안전성 강화 + UI 응답성 개선)"""
+        # 1. 락을 잡고 메모리 캐시와 프리로드 작업만 빠르게 처리
         with self.cache_lock:
+            self.current_preload_task = None
             self.memory_cache.clear()
 
-        # 디스크 캐시 삭제
+        # 2. 락을 해제한 후, 시간이 걸릴 수 있는 디스크 I/O 작업 수행
         try:
             import shutil
             if os.path.exists(DISK_CACHE_PATH):
@@ -539,17 +543,17 @@ def update_view(form_number, key_number, current_index, state_data):
     # === 캐시 활용 이미지 로드 ===
     if os.path.exists(image_path) and x is not None and y is not None:
         # 1. 캐시에서 이미지 가져오기 시도
-        zoomed_img = image_cache.get(form_number, key_number, image_path, current_index)
+        zoomed_img = image_cache.get(form_number, image_path, current_index)
 
         # 2. 캐시 미스 시 실시간 생성
         if zoomed_img is None:
             zoomed_img = process_image_for_display(form_number, key_number, image_path, current_index)
             if zoomed_img:
                 # 생성된 이미지를 캐시에 저장
-                image_cache.put(form_number, key_number, image_path, current_index, zoomed_img)
+                image_cache.put(form_number, image_path, current_index, zoomed_img)
 
         # 3. 백그라운드 프리로딩 트리거
-        image_cache.preload_images(form_number, key_number, image_files, current_index)
+        image_cache.preload_images(form_number, image_files, current_index)
 
         if zoomed_img:
             # HTML 생성 (이미지 + 클릭 가능한 버튼들)
@@ -747,7 +751,7 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
         # CSV 파일에 즉시 저장
         if save_csv_data(form_number, df):
             # === 캐시 무효화: 현재 이미지 캐시 삭제 ===
-            cache_key = image_cache._get_cache_key(form_number, key_number, local_image_path, current_index)
+            cache_key = image_cache._get_cache_key(form_number, local_image_path, current_index)
 
             # 메모리 캐시에서 삭제
             with image_cache.cache_lock:
@@ -780,6 +784,90 @@ def open_image_file(state_data):
         image_path = state_data["image_path"]
         if os.path.exists(image_path):
             os.startfile(os.path.abspath(image_path))
+
+def open_csv_file(state_data):
+    """CSV 파일 열기 버튼 콜백"""
+    if state_data and "form_number" in state_data:
+        form_number = state_data["form_number"]
+        csv_path = os.path.join(CSV_DIR, f"{form_number}.csv")
+        if os.path.exists(csv_path):
+            print(f"📄 {csv_path} 파일을 엽니다.")
+            os.startfile(os.path.abspath(csv_path))
+        else:
+            print(f"❌ 파일을 찾을 수 없습니다: {csv_path}")
+
+def clear_cache_and_reload_view(state_data):
+    """이미지 캐시 청소 및 현재 뷰 재로드"""
+    if not state_data:
+        return [state_data] + [gr.update() for _ in range(len(outputs_list) - 1)]
+
+    print("🧹 이미지 캐시 청소를 시작합니다...")
+    image_cache.clear_all_cache()
+    print("✅ 캐시 청소 완료.")
+
+    # 현재 상태를 사용하여 뷰를 강제로 다시 렌더링 (캐시 재생성 유도)
+    return update_view(
+        state_data["form_number"],
+        state_data["key_number"],
+        state_data["current_index"],
+        state_data
+    )
+
+def reload_data_and_refresh_ui(state_data):
+    """데이터 리로드 및 UI 새로고침"""
+    global schema_json, csv_data_frames, converted_data_json
+    print("🔄 데이터 리로드를 시작합니다...")
+
+    # 데이터 다시 로드
+    schema_json = load_json(SCHEMA_JSON_PATH)
+    csv_data_frames = load_csv_data()
+
+    # converted_data_json 재생성
+    new_converted_data = {}
+    for form_number, df in csv_data_frames.items():
+        if 'image_path' not in df.columns:
+            continue
+        form_data = {}
+        for _, row in df.iterrows():
+            local_path = convert_path(row['image_path'], form_number)
+            ocr_data = {col: row[col] for col in df.columns if col != 'image_path'}
+            form_data[local_path] = ocr_data
+        new_converted_data[form_number] = form_data
+    converted_data_json = new_converted_data
+    print("✅ 데이터 리로드 완료.")
+
+    # state_data가 없으면 기본값 사용
+    if not state_data:
+        state_data = {}
+
+    # UI 컴포넌트 업데이트
+    form_choices = get_form_numbers()
+    current_form = state_data.get("form_number")
+    if current_form not in form_choices:
+        current_form = form_choices[0] if form_choices else None
+    form_update = gr.Dropdown(choices=form_choices, value=current_form)
+
+    # 현재 뷰도 함께 갱신
+    if current_form:
+        # 데이터를 리로드한 후의 새 key 목록 가져오기
+        new_keys = list(schema_json.get(current_form, {}).keys())
+        current_key = state_data.get("key_number")
+
+        # 기존 key가 더 이상 유효하지 않으면 첫 번째 key로 대체
+        if current_key not in new_keys:
+            current_key = new_keys[0] if new_keys else None
+
+        view_updates = update_view(
+            current_form,
+            current_key,  # 유효성이 검증된 key 사용
+            state_data.get("current_index", 0),
+            state_data
+        )
+    else:
+        view_updates = [state_data] + [gr.update() for _ in range(len(outputs_list) - 1)]
+
+    # form_number_dd를 먼저 업데이트하고, 그 다음에 나머지 뷰를 업데이트
+    return [form_update] + list(view_updates)
 
 def export_current_csv(state_data):
     """현재 작업 중인 CSV를 EXTRACT 폴더에 복사하고 폴더를 엽니다"""
@@ -1077,6 +1165,10 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
 
             with gr.Group():
                 gr.Markdown("### 기타")
+                with gr.Row():
+                    open_csv_btn = gr.Button("📄 CSV 열기", variant="secondary")
+                    clear_cache_btn = gr.Button("🧹 캐시 청소", variant="secondary")
+                reload_data_btn = gr.Button("🔄 데이터 리로드", variant="secondary")
                 export_btn = gr.Button("📤 CSV 내보내기", variant="primary")
                 export_status = gr.Textbox(label="내보내기 상태", interactive=False, show_label=False)
 
@@ -1184,6 +1276,27 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
         fn=export_current_csv,
         inputs=[state],
         outputs=[export_status]
+    )
+
+    # CSV 파일 열기 버튼 클릭 이벤트
+    open_csv_btn.click(
+        fn=open_csv_file,
+        inputs=[state],
+        outputs=None
+    )
+
+    # 캐시 청소 버튼 클릭 이벤트
+    clear_cache_btn.click(
+        fn=clear_cache_and_reload_view,
+        inputs=[state],
+        outputs=outputs_list
+    )
+
+    # 데이터 리로드 버튼 클릭 이벤트
+    reload_data_btn.click(
+        fn=reload_data_and_refresh_ui,
+        inputs=[state],
+        outputs=[form_number_dd] + outputs_list
     )
 
     # index_dd 변경 시 해당 인덱스로 이동
