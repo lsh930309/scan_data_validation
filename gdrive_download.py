@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -40,16 +42,24 @@ SYNC_ITEMS = [
 # Google Drive 루트 폴더 이름
 DRIVE_ROOT_FOLDER = 'scan_data_validation_backup'
 
+# 멀티스레딩 설정
+MAX_WORKERS = 10  # 동시 다운로드 스레드 수
+
 
 class GDriveDownloader:
     """Google Drive 다운로드 관리자"""
 
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, max_workers: int = MAX_WORKERS):
         self.project_root = project_root
         self.credentials_file = project_root / 'credentials.json'
         self.token_file = project_root / 'token.json'
         self.service = None
         self.root_folder_id = None
+        self.max_workers = max_workers
+        self.stats_lock = threading.Lock()
+        self.downloaded_count = 0
+        self.failed_count = 0
+        self.creds = None  # 인증 정보 저장
 
     def authenticate(self):
         """Google Drive API 인증"""
@@ -81,8 +91,13 @@ class GDriveDownloader:
                 token.write(creds.to_json())
             print("✅ 인증 완료")
 
+        self.creds = creds  # 인증 정보 저장
         self.service = build('drive', 'v3', credentials=creds)
         print("✅ Google Drive API 연결 완료")
+
+    def _get_service(self):
+        """스레드 안전 서비스 객체 생성"""
+        return build('drive', 'v3', credentials=self.creds)
 
     def find_folder(self, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
         """폴더 찾기"""
@@ -148,8 +163,39 @@ class GDriveDownloader:
             print(f"❌ 파일 다운로드 실패 ({local_path}): {error}")
             raise
 
-    def download_folder_recursive(self, folder_id: str, local_path: Path, desc: str = ""):
-        """폴더 재귀 다운로드"""
+    def _download_file_thread_safe(self, file_id: str, local_path: Path):
+        """스레드 안전 파일 다운로드"""
+        service = self._get_service()
+        request = service.files().get_media(fileId=file_id)
+
+        # 부모 디렉토리 생성
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 다운로드
+        with open(local_path, 'wb') as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+
+    def _download_file_worker(self, file_item: Dict, local_path: Path, total_files: int):
+        """멀티스레딩 다운로드 워커"""
+        file_path = local_path / file_item['name']
+
+        try:
+            self._download_file_thread_safe(file_item['id'], file_path)
+            with self.stats_lock:
+                self.downloaded_count += 1
+                print(f"   [{self.downloaded_count}/{total_files}] ✓ {file_item['name']}")
+            return True
+        except Exception as e:
+            with self.stats_lock:
+                self.failed_count += 1
+                print(f"   ❌ {file_item['name']}: {e}")
+            return False
+
+    def download_folder_recursive(self, folder_id: str, local_path: Path, desc: str = "", depth: int = 0):
+        """폴더 재귀 다운로드 (멀티스레딩)"""
         # 로컬 폴더 생성
         local_path.mkdir(parents=True, exist_ok=True)
 
@@ -163,23 +209,38 @@ class GDriveDownloader:
         files = [item for item in items if item['mimeType'] != 'application/vnd.google-apps.folder']
         folders = [item for item in items if item['mimeType'] == 'application/vnd.google-apps.folder']
 
-        print(f"  파일 {len(files)}개, 폴더 {len(folders)}개")
+        indent = "  " * depth
+        print(f"{indent}  파일 {len(files)}개, 폴더 {len(folders)}개")
 
-        # 파일 다운로드
-        for file_item in tqdm(files, desc=desc or f"  다운로드: {local_path.name}", leave=False):
-            file_path = local_path / file_item['name']
-            file_size = int(file_item.get('size', 0))
+        # 파일 다운로드 (멀티스레딩)
+        if files:
+            print(f"{indent}  파일 다운로드 시작... (동시 {self.max_workers}개 스레드)")
+            self.downloaded_count = 0
+            self.failed_count = 0
 
-            try:
-                self.download_file(file_item['id'], file_path, file_size)
-            except Exception as e:
-                print(f"⚠️  파일 다운로드 실패: {file_path} - {e}")
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = []
+                for file_item in files:
+                    future = executor.submit(
+                        self._download_file_worker,
+                        file_item,
+                        local_path,
+                        len(files)
+                    )
+                    futures.append(future)
+
+                # 모든 작업 완료 대기
+                for future in as_completed(futures):
+                    future.result()
+
+            print(f"\n{indent}  ✅ 파일 다운로드 완료!")
+            print(f"{indent}     성공: {self.downloaded_count}개, 실패: {self.failed_count}개")
 
         # 하위 폴더 재귀 다운로드
         for folder_item in folders:
             subfolder_path = local_path / folder_item['name']
-            print(f"  📁 {folder_item['name']}")
-            self.download_folder_recursive(folder_item['id'], subfolder_path)
+            print(f"{indent}  📁 {folder_item['name']}")
+            self.download_folder_recursive(folder_item['id'], subfolder_path, depth=depth+1)
 
     def download_item(self, item_name: str):
         """개별 항목 다운로드 (파일 또는 폴더)"""
@@ -296,6 +357,14 @@ def main():
         help='특정 항목 제외 (예: .venv)'
     )
 
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=MAX_WORKERS,
+        metavar='N',
+        help=f'동시 다운로드 스레드 수 (기본: {MAX_WORKERS}, 권장: 5-20)'
+    )
+
     args = parser.parse_args()
 
     # 다운로드 항목 결정
@@ -310,7 +379,7 @@ def main():
     project_root = Path(__file__).parent
 
     # 다운로더 실행
-    downloader = GDriveDownloader(project_root)
+    downloader = GDriveDownloader(project_root, max_workers=args.workers)
     downloader.sync(sync_items)
 
 

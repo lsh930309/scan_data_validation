@@ -12,6 +12,8 @@ import argparse
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -30,7 +32,6 @@ SYNC_ITEMS = [
     'csv',
     'handout',
     'EXTRACT',
-    '.venv',
     'value_masters-v5',
     'data.json',
     'data.json.bak',
@@ -40,16 +41,25 @@ SYNC_ITEMS = [
 # Google Drive 루트 폴더 이름
 DRIVE_ROOT_FOLDER = 'scan_data_validation_backup'
 
+# 멀티스레딩 설정
+MAX_WORKERS = 50  # 동시 업로드 스레드 수 (조정 가능)
+
 
 class GDriveUploader:
     """Google Drive 업로드 관리자"""
 
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, max_workers: int = MAX_WORKERS):
         self.project_root = project_root
         self.credentials_file = project_root / 'credentials.json'
         self.token_file = project_root / 'token.json'
         self.service = None
         self.root_folder_id = None
+        self.max_workers = max_workers
+        self.upload_lock = threading.Lock()
+        self.stats_lock = threading.Lock()
+        self.uploaded_count = 0
+        self.failed_count = 0
+        self.creds = None  # 인증 정보 저장
 
     def authenticate(self):
         """Google Drive API 인증"""
@@ -81,8 +91,14 @@ class GDriveUploader:
                 token.write(creds.to_json())
             print("✅ 인증 완료")
 
+        self.creds = creds  # 인증 정보 저장
         self.service = build('drive', 'v3', credentials=creds)
         print("✅ Google Drive API 연결 완료")
+
+    def _get_service(self):
+        """스레드 안전 서비스 객체 생성"""
+        # 각 스레드마다 독립적인 서비스 객체 생성
+        return build('drive', 'v3', credentials=self.creds)
 
     def get_or_create_folder(self, folder_name: str, parent_id: Optional[str] = None) -> str:
         """폴더 가져오기 또는 생성"""
@@ -161,8 +177,57 @@ class GDriveUploader:
             print(f"❌ 파일 업로드 실패 ({local_path}): {error}")
             raise
 
+    def _upload_file_thread_safe(self, file_path: Path, parent_folder_id: str):
+        """스레드 안전 파일 업로드"""
+        # 각 스레드마다 독립적인 서비스 객체 사용
+        service = self._get_service()
+        file_name = file_path.name
+
+        # 기존 파일 검색
+        query = f"name='{file_name}' and '{parent_folder_id}' in parents and trashed=false"
+        results = service.files().list(
+            q=query,
+            spaces='drive',
+            fields='files(id, name)'
+        ).execute()
+
+        files = results.get('files', [])
+        file_metadata = {'name': file_name, 'parents': [parent_folder_id]}
+        media = MediaFileUpload(str(file_path), resumable=True)
+
+        if files:
+            # 기존 파일 업데이트
+            file_id = files[0]['id']
+            service.files().update(
+                fileId=file_id,
+                media_body=media
+            ).execute()
+        else:
+            # 새 파일 생성
+            service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+
+    def _upload_file_worker(self, file_path: Path, parent_folder_id: str, local_dir: Path, total_files: int):
+        """멀티스레딩 업로드 워커"""
+        try:
+            self._upload_file_thread_safe(file_path, parent_folder_id)
+            with self.stats_lock:
+                self.uploaded_count += 1
+                relative_path = file_path.relative_to(local_dir)
+                print(f"   [{self.uploaded_count}/{total_files}] ✓ {relative_path}")
+            return True
+        except Exception as e:
+            with self.stats_lock:
+                self.failed_count += 1
+                relative_path = file_path.relative_to(local_dir)
+                print(f"   ❌ {relative_path}: {e}")
+            return False
+
     def upload_directory(self, local_dir: Path, parent_id: str, desc: str = ""):
-        """디렉토리 재귀 업로드"""
+        """디렉토리 재귀 업로드 (멀티스레딩)"""
         if not local_dir.exists():
             print(f"⚠️  {local_dir} 폴더가 존재하지 않습니다. 건너뜁니다.")
             return
@@ -181,7 +246,8 @@ class GDriveUploader:
 
         print(f"📁 {local_dir.name}: 파일 {len(files)}개, 폴더 {len(dirs)}개")
 
-        # 폴더 구조 생성
+        # 폴더 구조 생성 (순차 처리)
+        print(f"   폴더 구조 생성 중...")
         folder_map = {local_dir: folder_id}
         for dir_path in sorted(dirs):
             relative_path = dir_path.relative_to(local_dir)
@@ -191,15 +257,31 @@ class GDriveUploader:
             new_folder_id = self.get_or_create_folder(dir_path.name, parent_folder_id)
             folder_map[dir_path] = new_folder_id
 
-        # 파일 업로드
-        for file_path in tqdm(files, desc=desc or f"업로드: {local_dir.name}"):
-            relative_path = file_path.relative_to(local_dir)
-            parent_folder_id = folder_map[file_path.parent]
+        # 파일 업로드 (멀티스레딩)
+        print(f"   파일 업로드 시작... (동시 {self.max_workers}개 스레드)")
+        self.uploaded_count = 0
+        self.failed_count = 0
 
-            try:
-                self.upload_file(file_path, parent_folder_id)
-            except Exception as e:
-                print(f"⚠️  파일 업로드 실패: {file_path} - {e}")
+        # ThreadPoolExecutor로 병렬 업로드
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = []
+            for file_path in files:
+                parent_folder_id = folder_map[file_path.parent]
+                future = executor.submit(
+                    self._upload_file_worker,
+                    file_path,
+                    parent_folder_id,
+                    local_dir,
+                    len(files)
+                )
+                futures.append(future)
+
+            # 모든 작업 완료 대기
+            for future in as_completed(futures):
+                future.result()
+
+        print(f"\n   ✅ {local_dir.name} 업로드 완료!")
+        print(f"      성공: {self.uploaded_count}개, 실패: {self.failed_count}개")
 
     def upload_single_file(self, local_file: Path, parent_id: str, desc: str = ""):
         """단일 파일 업로드"""
@@ -283,6 +365,14 @@ def main():
         help='특정 항목 제외 (예: .venv)'
     )
 
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=MAX_WORKERS,
+        metavar='N',
+        help=f'동시 업로드 스레드 수 (기본: {MAX_WORKERS}, 권장: 5-20)'
+    )
+
     args = parser.parse_args()
 
     # 업로드 항목 결정
@@ -297,7 +387,7 @@ def main():
     project_root = Path(__file__).parent
 
     # 업로더 실행
-    uploader = GDriveUploader(project_root)
+    uploader = GDriveUploader(project_root, max_workers=args.workers)
     uploader.sync(sync_items)
 
 
