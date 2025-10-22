@@ -1,22 +1,8 @@
-**/images/
 **/images.old/
-*.csv
-*.zip
 cache.json
-**/handout/
 **/__pycache__/
-**/.claude/
 
 # Google Drive 동기화 관련
 credentials.json
 token.json
 .gdrive_sync.json
-
-# 데이터 파일
-data*.json
-data*.jsonc
-*.bak
-
-# 추출 데이터
-EXTRACT/
-value_masters-v5/
