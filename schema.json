@@ -50523,6 +50523,86 @@
       "required": true,
       "x": 0.894,
       "y": 0.356
+    },
+    "016": {
+      "ocr_key": "위 고유식별정보 조회에 동의하십니까?⇒연대보증인 III⇒동의하지 않음",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.77,
+      "y": 0.378
+    },
+    "017": {
+      "ocr_key": "위 고유식별정보 조회에 동의하십니까?⇒연대보증인 III⇒동의함",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.896,
+      "y": 0.378
+    },
+    "018": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒신청인 (본인)⇒동의하지 않음",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.77,
+      "y": 0.552
+    },
+    "019": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒신청인 (본인)⇒동의함",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.896,
+      "y": 0.552
+    },
+    "020": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒연대보증인 I⇒동의하지 않음",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.769,
+      "y": 0.573
+    },
+    "021": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒연대보증인 I⇒동의함",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.894,
+      "y": 0.574
+    },
+    "022": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒연대보증인 II⇒동의하지 않음",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.769,
+      "y": 0.597
+    },
+    "023": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒연대보증인 II⇒동의함",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.894,
+      "y": 0.596
+    },
+    "024": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒연대보증인 III⇒동의하지 않음",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.769,
+      "y": 0.618
+    },
+    "025": {
+      "ocr_key": "위 개인신용정보 조회에 동의하십니까?⇒연대보증인 III⇒동의함",
+      "db_key": "nan",
+      "checkbox": true,
+      "required": true,
+      "x": 0.894,
+      "y": 0.618
     }
   },
   "430": {

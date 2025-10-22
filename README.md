@@ -17,13 +17,45 @@ OCR 데이터 검수 및 수정을 위한 고속 Gradio 기반 웹 인터페이�
 
 ## 📦 설치
 
-### 1. 필수 패키지 설치
+### 1. Git Clone
 
 ```bash
+git clone <repository-url>
+cd scan_data_validation
+```
+
+### 2. 필수 패키지 설치
+
+```bash
+# 가상환경 생성 (권장)
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # Linux/Mac
+
+# 패키지 설치
 pip install -r requirements.txt
 ```
 
-### 2. 데이터 준비
+### 3. 데이터 준비
+
+#### 옵션 A: Google Drive에서 다운로드 (재택/새 환경)
+
+Google Drive에 백업된 데이터를 자동으로 다운로드합니다:
+
+```bash
+# Google Drive API 설정 (최초 1회)
+# GDRIVE_SETUP.md 참조하여 credentials.json 생성
+
+# 데이터 다운로드
+python gdrive_download.py
+
+# 특정 항목만 다운로드
+python gdrive_download.py --only images csv data.json
+```
+
+자세한 설정 방법은 [GDRIVE_SETUP.md](GDRIVE_SETUP.md) 참조
+
+#### 옵션 B: 수동 배치
 
 프로젝트 루트에 다음 파일들을 배치하세요:
 
@@ -180,6 +212,58 @@ python compare_changes.py
 키 A: "이전값" → "새값"
 키 B: "✘" → "✔"
 ```
+
+## ☁️ Google Drive 동기화
+
+재택 근무 등 환경 전환 시 Git으로 추적되지 않는 대용량 파일(이미지, 데이터 등)을 Google Drive로 백업/복원할 수 있습니다.
+
+### 회사 PC에서 업로드
+
+```bash
+# 전체 업로드 (images, csv, data.json 등)
+python gdrive_upload.py
+
+# 특정 항목만 업로드
+python gdrive_upload.py --only images csv
+
+# 특정 항목 제외
+python gdrive_upload.py --exclude .venv
+```
+
+### 집 PC에서 다운로드
+
+```bash
+# git clone 후
+git clone <repository-url>
+cd scan_data_validation
+
+# Google Drive에서 데이터 다운로드
+python gdrive_download.py
+
+# 가상환경 활성화
+.venv\Scripts\activate
+```
+
+### 동기화 항목
+
+자동으로 동기화되는 항목:
+- `images/` - 스캔 이미지 (약 1.3GB)
+- `.venv/` - 가상환경 (약 1.1GB)
+- `handout/` - 문서 파일
+- `csv/` - CSV 데이터
+- `data.json`, `data_v3.jsonc` - OCR 결과
+- `EXTRACT/`, `value_masters-v5/` - 추출 데이터
+
+### 초기 설정
+
+최초 1회만 Google Drive API 인증이 필요합니다:
+
+1. [GDRIVE_SETUP.md](GDRIVE_SETUP.md) 가이드 참조
+2. Google Cloud Console에서 OAuth 인증 파일(`credentials.json`) 생성
+3. 프로젝트 루트에 `credentials.json` 배치
+4. 스크립트 실행 시 브라우저에서 자동 인증
+
+**주의**: `credentials.json`과 `token.json`은 절대 Git에 커밋하지 마세요! (`.gitignore`에 등록됨)
 
 ## 🤝 기여
 

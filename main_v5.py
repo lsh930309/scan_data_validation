@@ -8,6 +8,8 @@ import hashlib
 from collections import OrderedDict
 from pathlib import Path
 import io
+import webbrowser
+import time
 import pandas as pd
 from cache_manager import CacheManager
 from fastapi import FastAPI
@@ -1399,6 +1401,7 @@ async def save_cache_api():
 
 # Gradio 앱을 FastAPI에 마운트
 app = gr.mount_gradio_app(app, demo, path="/")
+webbrowser.open("http://127.0.0.1:7860")
 
 if __name__ == "__main__":
     import uvicorn
