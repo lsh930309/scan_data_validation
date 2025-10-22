@@ -1,4 +1,4 @@
-**/images/_cache/
+*.png
 **/images.old/
 cache.json
 **/__pycache__/
