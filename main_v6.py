@@ -243,31 +243,17 @@ def save_csv_data(form_number, df):
         print(f"❌ {form_number}.csv 저장 실패: {e}")
         return False
 
-def convert_path(server_path, form_number=None):
-    """서버 경로를 로컬 images/ 경로로 변환합니다
+def convert_path(filename, form_number):
+    """파일명과 form_number를 조합하여 로컬 images/ 경로를 생성합니다
 
-    예: /mnt/AI_NAS/.../images/068/A0000.jpg -> images/068/A0000.jpg
+    예: filename='A0000', form_number='068' -> 'images/068/A0000.jpg'
     """
-    # 방법 1: 'images/' 문자열을 기준으로 분리
-    try:
-        # 경로 구분자 통일 (\ -> /)
-        normalized_path = server_path.replace('\\', '/')
+    if not form_number or not filename:
+        return None
 
-        # 'images/' 뒷부분 추출
-        if 'images/' in normalized_path:
-            parts = normalized_path.split('images/')
-            local_relative_path = parts[-1]  # 마지막 'images/' 이후 부분
-            return os.path.join(IMAGE_ROOT_PATH, local_relative_path)
-    except Exception as e:
-        print(f"경로 변환 실패 (방법1): {e}")
-
-    # 방법 2: form_number와 파일명으로 조합 (fallback)
-    if form_number:
-        filename = os.path.basename(server_path)
-        return os.path.join(IMAGE_ROOT_PATH, form_number, filename)
-
-    # 최종 fallback: 원본 경로 반환
-    return server_path
+    # .jpg 확장자 추가
+    filename_with_ext = f"{filename}.jpg"
+    return os.path.join(IMAGE_ROOT_PATH, form_number, filename_with_ext)
 
 # --- Main Application Logic ---
 schema_json = load_json(SCHEMA_JSON_PATH)
@@ -276,17 +262,20 @@ csv_data_frames = load_csv_data()  # {form_number: DataFrame}
 # CSV 데이터를 converted_data_json 형식으로 변환 (기존 코드와 호환성 유지)
 converted_data_json = {}
 for form_number, df in csv_data_frames.items():
-    if 'image_path' not in df.columns:
-        print(f"경고: {form_number}.csv에 image_path 컬럼이 없습니다.")
+    if 'image' not in df.columns:
+        print(f"경고: {form_number}.csv에 image 컬럼이 없습니다.")
         continue
 
     form_data = {}
     for _, row in df.iterrows():
-        server_path = row['image_path']
-        local_path = convert_path(server_path, form_number)
+        filename = row['image']
+        local_path = convert_path(filename, form_number)
 
-        # row를 딕셔너리로 변환 (image_path 제외)
-        ocr_data = {col: row[col] for col in df.columns if col != 'image_path'}
+        if local_path is None:
+            continue
+
+        # row를 딕셔너리로 변환 (image 제외)
+        ocr_data = {col: row[col] for col in df.columns if col != 'image'}
         form_data[local_path] = ocr_data
 
     converted_data_json[form_number] = form_data
@@ -726,22 +715,17 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
                 return "⚠️ CSV 파일을 열었습니다. 적절한 공란 기호('∅' 또는 '␣')를 확인한 후 다시 저장하세요.", gr.update(), state_data
             new_value = empty_symbol
 
-    # local_image_path에서 서버 경로 역변환
-    # 예: images/068/A0000.jpg -> /mnt/AI_NAS/.../images/068/A0000.jpg
-    # 'images/' 이후 부분을 추출
+    # local_image_path에서 파일명 추출 (확장자 제거)
+    # 예: images/068/A0000.jpg -> A0000
     try:
-        normalized_local = local_image_path.replace('\\', '/')
-        if 'images/' in normalized_local:
-            relative_part = normalized_local.split('images/')[-1]  # '068/A0000.jpg'
-        else:
-            relative_part = '/'.join(normalized_local.split('/')[-2:])  # fallback
+        filename_with_ext = os.path.basename(local_image_path)  # 'A0000.jpg'
+        filename = os.path.splitext(filename_with_ext)[0]  # 'A0000' (확장자 제거)
 
-        # DataFrame에서 해당 경로를 포함하는 행 찾기
-        # CSV의 image_path는 전체 절대 경로이므로, 끝부분이 일치하는 행을 찾음
-        matching_rows = df[df['image_path'].str.endswith(relative_part)]
+        # DataFrame에서 해당 파일명과 일치하는 행 찾기
+        matching_rows = df[df['image'] == filename]
 
         if matching_rows.empty:
-            return f"오류: CSV에서 경로를 찾을 수 없습니다: {relative_part}", gr.update(), state_data
+            return f"오류: CSV에서 파일을 찾을 수 없습니다: {filename}", gr.update(), state_data
 
         # DataFrame 업데이트
         row_index = matching_rows.index[0]
@@ -827,12 +811,15 @@ def reload_data_and_refresh_ui(state_data):
     # converted_data_json 재생성
     new_converted_data = {}
     for form_number, df in csv_data_frames.items():
-        if 'image_path' not in df.columns:
+        if 'image' not in df.columns:
             continue
         form_data = {}
         for _, row in df.iterrows():
-            local_path = convert_path(row['image_path'], form_number)
-            ocr_data = {col: row[col] for col in df.columns if col != 'image_path'}
+            filename = row['image']
+            local_path = convert_path(filename, form_number)
+            if local_path is None:
+                continue
+            ocr_data = {col: row[col] for col in df.columns if col != 'image'}
             form_data[local_path] = ocr_data
         new_converted_data[form_number] = form_data
     converted_data_json = new_converted_data

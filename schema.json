@@ -20423,7 +20423,7 @@
     "022": {
       "ocr_key": "대출 조건⇒상환방법⇒기타",
       "db_key": "nan",
-      "checkbox": false,
+      "checkbox": true,
       "required": true,
       "x": 0.917,
       "y": 0.305
