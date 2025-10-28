@@ -1,7 +1,7 @@
 import gradio as gr
 import json
 import os
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import copy
 import threading
 import hashlib
@@ -23,6 +23,9 @@ DISK_CACHE_PATH = os.path.join(IMAGE_ROOT_PATH, '_cache')
 MEMORY_CACHE_SIZE = 15  # ±2 이미지 + 여유분
 PRELOAD_RANGE = 2  # 현재 이미지 기준 ±2개
 EXTRACT_DIR = 'EXTRACT'  # CSV 내보내기 폴더
+
+# --- Text Rendering Configuration ---
+ENABLE_TEXT_RENDERING = True  # 텍스트 렌더링 활성화 여부 (key_number, value)
 
 # --- Hybrid Caching System ---
 class HybridImageCache:
@@ -372,6 +375,11 @@ def generate_interactive_html(pil_image, form_number, button_size=20, debug_mode
 
 def process_image_for_display(form_number, key_number, image_path, index):
     """이미지를 처리하여 디스플레이용 이미지 생성 (원본 전체 표시 + 형광펜)"""
+    # 텍스트 설정 (수정 가능한 변수)
+    TEXT_FONT_SIZE = 30
+    TEXT_COLOR = (255, 0, 0)  # 빨간색 (key_number, value 모두)
+    TEXT_LINE_SPACING = TEXT_FONT_SIZE * 2  # key_number와 value 사이 간격
+
     # 이미지 로드
     if not os.path.exists(image_path):
         return None
@@ -379,6 +387,16 @@ def process_image_for_display(form_number, key_number, image_path, index):
     try:
         with Image.open(image_path) as img:
             img_w, img_h = img.size
+
+            # 폰트 로드 (한글 지원)
+            try:
+                # Windows 기본 한글 폰트 시도
+                font = ImageFont.truetype("malgun.ttf", TEXT_FONT_SIZE)  # 맑은 고딕
+            except:
+                try:
+                    font = ImageFont.truetype("gulim.ttc", TEXT_FONT_SIZE)  # 굴림
+                except:
+                    font = ImageFont.load_default()  # 폴백: 기본 폰트
 
             # 원본 이미지를 그대로 사용 (크롭 없음)
             # RGBA 모드로 변경하여 투명도 처리
@@ -397,6 +415,9 @@ def process_image_for_display(form_number, key_number, image_path, index):
             # 현재 form_number의 모든 key를 순회
             all_keys = schema_json.get(form_number, {})
             ocr_data = converted_data_json.get(form_number, {}).get(image_path, {})
+
+            # 텍스트 정보를 저장할 리스트 (나중에 그리기 위함)
+            text_items = []
 
             for current_key, key_info in all_keys.items():
                 x = key_info.get('x')
@@ -418,7 +439,7 @@ def process_image_for_display(form_number, key_number, image_path, index):
                     # 체크박스: ✔만 그리기
                     if ocr_value == "✔":
                         should_draw = True
-                        highlighter_size = (20, 20)
+                        highlighter_size = (TEXT_FONT_SIZE, TEXT_FONT_SIZE)
                 else:
                     # 일반 필드: ∅, ␣ 제외
                     if ocr_value not in ["∅", "␣", "N/A"]:
@@ -426,8 +447,8 @@ def process_image_for_display(form_number, key_number, image_path, index):
                         # 텍스트 폭 기반 크기 계산
                         text_str = str(ocr_value)
                         display_width = sum(2 if ord(c) > 127 else 1 for c in text_str)
-                        highlighter_width = max(20, display_width * 7)
-                        highlighter_size = (highlighter_width, 20)
+                        highlighter_width = max(TEXT_FONT_SIZE, display_width * TEXT_FONT_SIZE / 2)
+                        highlighter_size = (highlighter_width, TEXT_FONT_SIZE)
 
                 # 형광펜 그리기
                 if should_draw and highlighter_size:
@@ -446,6 +467,17 @@ def process_image_for_display(form_number, key_number, image_path, index):
                          fill=highlighter_color
                          )
 
+                    # 텍스트 정보 저장 (나중에 그리기 위함)
+                    text_items.append({
+                        'key_number': current_key,
+                        'value': ocr_value,
+                        'is_checkbox': is_checkbox,
+                        'point_x': point_x,
+                        'point_y': point_y,
+                        'margin_x': margin_x,
+                        'margin_y': margin_y
+                    })
+
             # Multiply 블렌드 모드 적용 (형광펜 효과)
             # 원본 픽셀과 형광펜 색상을 곱하여 어두운 부분은 그대로, 밝은 부분만 노랗게
             import numpy as np
@@ -461,6 +493,37 @@ def process_image_for_display(form_number, key_number, image_path, index):
 
             # 최종적으로 RGBA로 변환 (기존 알파 채널 유지)
             result_img = result_img.convert('RGBA')
+
+            # 텍스트 그리기 (should_draw가 True였던 항목만, ENABLE_TEXT_RENDERING이 True일 때만)
+            if ENABLE_TEXT_RENDERING:
+                text_draw = ImageDraw.Draw(result_img)
+                for item in text_items:
+                    key_number = item['key_number']
+                    value = item['value']
+                    is_checkbox = item['is_checkbox']
+                    point_x = item['point_x']
+                    point_y = item['point_y']
+                    margin_x = item['margin_x']
+                    margin_y = item['margin_y']
+
+                    # 체크박스인 경우 O/X로 변환
+                    if is_checkbox:
+                        if value == "✔":
+                            display_value = "O"
+                        elif value == "✘":
+                            display_value = "X"
+                        else:
+                            display_value = value
+                    else:
+                        display_value = value
+
+                    # key_number 텍스트 그리기 (value 위쪽)
+                    key_text = f"({key_number})"
+                    key_y = point_y + margin_y - TEXT_LINE_SPACING
+                    text_draw.text((point_x + margin_x, key_y), key_text, fill=TEXT_COLOR, font=font)
+
+                    # value 텍스트 그리기 (하이라이트 영역과 동일한 위치)
+                    text_draw.text((point_x + margin_x, point_y + margin_y), display_value, fill=TEXT_COLOR, font=font)
 
             return result_img
     except Exception as e:
@@ -792,6 +855,29 @@ def clear_cache_and_reload_view(state_data):
     print("✅ 캐시 청소 완료.")
 
     # 현재 상태를 사용하여 뷰를 강제로 다시 렌더링 (캐시 재생성 유도)
+    return update_view(
+        state_data["form_number"],
+        state_data["key_number"],
+        state_data["current_index"],
+        state_data
+    )
+
+def toggle_text_rendering(enable, state_data):
+    """텍스트 렌더링 on/off 토글 및 캐시 재생성"""
+    global ENABLE_TEXT_RENDERING
+
+    ENABLE_TEXT_RENDERING = enable
+    status = "활성화" if enable else "비활성화"
+    print(f"📝 텍스트 렌더링 {status}")
+
+    if not state_data:
+        return [state_data] + [gr.update() for _ in range(len(outputs_list) - 1)]
+
+    # 캐시 청소 (텍스트 렌더링 설정 변경 시 기존 이미지는 무효화)
+    print("🧹 설정 변경으로 인한 캐시 청소...")
+    image_cache.clear_all_cache()
+
+    # 현재 상태로 뷰 재로드
     return update_view(
         state_data["form_number"],
         state_data["key_number"],
@@ -1161,6 +1247,13 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
                 export_btn = gr.Button("📤 CSV 내보내기", variant="primary")
                 export_status = gr.Textbox(label="내보내기 상태", interactive=False, show_label=False)
 
+                # 텍스트 렌더링 on/off 체크박스
+                text_rendering_checkbox = gr.Checkbox(
+                    label="📝 텍스트 렌더링 활성화 (key_number, value 표시)",
+                    value=ENABLE_TEXT_RENDERING,
+                    info="체크 해제 시 하이라이트만 표시됩니다"
+                )
+
         # 우측: 세로로 긴 이미지 뷰어 (A4 비율 1:1.414)
         with gr.Column(scale=6):
             image_display = gr.HTML(label="이미지 뷰어 (클릭 가능)")
@@ -1278,6 +1371,13 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
     clear_cache_btn.click(
         fn=clear_cache_and_reload_view,
         inputs=[state],
+        outputs=outputs_list
+    )
+
+    # 텍스트 렌더링 토글 이벤트
+    text_rendering_checkbox.change(
+        fn=toggle_text_rendering,
+        inputs=[text_rendering_checkbox, state],
         outputs=outputs_list
     )
 
