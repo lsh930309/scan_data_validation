@@ -1,7 +1,8 @@
 *.png
 **/.oldfiles/
-cache.json
+**/images.notext/
 **/__pycache__/
+cache.json
 
 # Google Drive 동기화 관련
 credentials.json

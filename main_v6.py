@@ -17,11 +17,11 @@ from fastapi import FastAPI
 # --- Configuration ---
 CSV_DIR = 'csv'
 SCHEMA_JSON_PATH = 'schema.json'
-IMAGE_ROOT_PATH = 'images'
+IMAGE_ROOT_PATH = 'images.notext'
 CACHE_JSON_PATH = 'cache.json'
 DISK_CACHE_PATH = os.path.join(IMAGE_ROOT_PATH, '_cache')
 MEMORY_CACHE_SIZE = 15  # ±2 이미지 + 여유분
-PRELOAD_RANGE = 2  # 현재 이미지 기준 ±2개
+PRELOAD_RANGE = 5  # 현재 이미지 기준 ±2개
 EXTRACT_DIR = 'EXTRACT'  # CSV 내보내기 폴더
 
 # --- Text Rendering Configuration ---
@@ -376,9 +376,9 @@ def generate_interactive_html(pil_image, form_number, button_size=20, debug_mode
 def process_image_for_display(form_number, key_number, image_path, index):
     """이미지를 처리하여 디스플레이용 이미지 생성 (원본 전체 표시 + 형광펜)"""
     # 텍스트 설정 (수정 가능한 변수)
-    TEXT_FONT_SIZE = 30
+    TEXT_FONT_SIZE = 20
     TEXT_COLOR = (255, 0, 0)  # 빨간색 (key_number, value 모두)
-    TEXT_LINE_SPACING = TEXT_FONT_SIZE * 2  # key_number와 value 사이 간격
+    TEXT_LINE_SPACING = TEXT_FONT_SIZE  # key_number와 value 사이 간격
 
     # 이미지 로드
     if not os.path.exists(image_path):
@@ -455,8 +455,8 @@ def process_image_for_display(form_number, key_number, image_path, index):
                     # 좌표를 실제 픽셀 좌표로 변환
                     point_x = int(x * img_w)
                     point_y = int(y * img_h)
-                    margin_x = 0
-                    margin_y = 15
+                    margin_x = 10
+                    margin_y = 20
 
                     draw.rectangle(
                         [point_x + margin_x,
