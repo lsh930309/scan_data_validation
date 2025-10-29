@@ -998,15 +998,15 @@ custom_css = """
     padding: 0;
 
     /* 중요: 중심점 정렬 */
-    transform: translate(-0%, -0%);
+    transform: translate(50%, 30%);
 
     transition: background-color 0.2s, transform 0.2s;
     z-index: 10;
 }
 
 .interactive-button:hover {
-    background-color: rgba(255, 193, 7, 0.7); /* 호버 시 반투명 노란색 */
-    transform: translate(-0%, -0%) scale(1.3); /* 살짝 확대 */
+    background-color: rgba(7, 193, 255, 0.7); /* 호버 시 반투명 노란색 */
+    transform: translate(50%, 30%) scale(1.5); /* 살짝 확대 */
 }
 
 /* 디버그 모드: debug-mode 클래스 제거 시 테두리 숨김 */
@@ -1218,14 +1218,14 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
                     filename_textbox = gr.Textbox(label="Filename", interactive=False)
                     is_checkbox_textbox = gr.Textbox(label="Type", interactive=False)
                 ocr_key_textbox = gr.Textbox(label="OCR Key", interactive=False)
-                open_file_btn = gr.Button("📂 파일 열기", variant="secondary")
+                open_file_btn = gr.Button("📂 이미지 열기", variant="secondary")
 
             with gr.Group():
                 gr.Markdown("### 데이터 입력")
                 ocr_textbox = gr.Textbox(label="OCR 값", interactive=True, visible=True)
                 checkbox_radio = gr.Radio(["✘", "✔"], label="OCR 값", visible=False, interactive=True)
                 save_status = gr.Textbox(label="저장 상태", interactive=False, show_label=False)
-                save_btn = gr.Button("💾 저장 (Enter)", elem_id="save_button", variant="secondary")
+                save_btn = gr.Button("💾 저장 (Enter)", elem_id="save_button", visible=False)
 
             with gr.Group():
                 gr.Markdown("### 네비게이션")
