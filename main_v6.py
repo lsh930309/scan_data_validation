@@ -1225,7 +1225,7 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
                 ocr_textbox = gr.Textbox(label="OCR 값", interactive=True, visible=True)
                 checkbox_radio = gr.Radio(["✘", "✔"], label="OCR 값", visible=False, interactive=True)
                 save_status = gr.Textbox(label="저장 상태", interactive=False, show_label=False)
-                save_btn = gr.Button("💾 저장 (Enter)", elem_id="save_button", visible=False)
+                save_btn = gr.Button("💾 저장 (Enter)", elem_id="save_button", variant="secondary")
 
             with gr.Group():
                 gr.Markdown("### 네비게이션")
