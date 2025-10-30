@@ -64911,6 +64911,46 @@
       "required": false,
       "x": 0.908,
       "y": 0.838
+    },
+    "025": {
+      "ocr_key": "연대보증인 III⇒<|1|>년 <|2|>월 <|3|>일⇒<|1|>",
+      "db_key": "작성일자",
+      "checkbox": false,
+      "required": false,
+      "x": 0.037,
+      "y": 0.880
+    },
+    "026": {
+      "ocr_key": "연대보증인 III⇒<|1|>년 <|2|>월 <|3|>일⇒<|2|>",
+      "db_key": "작성일자",
+      "checkbox": false,
+      "required": false,
+      "x": 0.289,
+      "y": 0.884
+    },
+    "027": {
+      "ocr_key": "연대보증인 III⇒<|1|>년 <|2|>월 <|3|>일⇒<|3|>",
+      "db_key": "작성일자",
+      "checkbox": false,
+      "required": false,
+      "x": 0.403,
+      "y": 0.887
+    },
+    "028": {
+      "ocr_key": "연대보증인 III⇒<|NAME|>",
+      "db_key": "보증인명",
+      "checkbox": false,
+      "required": false,
+      "x": 0.718,
+      "y": 0.884
+    },
+    "029": {
+      "ocr_key": "연대보증인 III⇒인/서명",
+      "db_key": "서명여부",
+      "checkbox": true,
+      "required": false,
+      "x": 0.908,
+      "y": 0.883
     }
   },
   "532": {
