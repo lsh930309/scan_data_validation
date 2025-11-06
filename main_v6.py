@@ -203,6 +203,48 @@ image_cache = HybridImageCache()
 cache_manager = CacheManager(cache_file=CACHE_JSON_PATH, debounce_delay=2.0)
 
 # --- Data Loading ---
+def scan_image_folders():
+    """이미지 폴더 구조를 스캔하여 성능 최적화용 캐시 생성
+
+    Returns:
+        tuple: (available_folders, folder_image_files)
+        - available_folders: set - 존재하는 이미지 폴더명 목록
+        - folder_image_files: dict - {폴더명: set(파일명)} 각 폴더의 이미지 파일 목록
+    """
+    available_folders = set()
+    folder_image_files = {}
+
+    if not os.path.exists(IMAGE_ROOT_PATH):
+        print(f"⚠️ 이미지 루트 폴더를 찾을 수 없습니다: {IMAGE_ROOT_PATH}")
+        return available_folders, folder_image_files
+
+    print(f"📂 이미지 폴더 구조 스캔 중...")
+
+    try:
+        for item in os.listdir(IMAGE_ROOT_PATH):
+            folder_path = os.path.join(IMAGE_ROOT_PATH, item)
+            if os.path.isdir(folder_path):
+                available_folders.add(item)
+
+                # 각 폴더의 이미지 파일 목록 (확장자 제외)
+                image_files = set()
+                try:
+                    for img_file in os.listdir(folder_path):
+                        if img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                            # 확장자 제거
+                            filename_without_ext = os.path.splitext(img_file)[0]
+                            image_files.add(filename_without_ext)
+                    folder_image_files[item] = image_files
+                    print(f"  ✓ {item}: {len(image_files)}개 이미지")
+                except Exception as e:
+                    print(f"  ✗ {item}: 스캔 실패 - {e}")
+
+    except Exception as e:
+        print(f"❌ 이미지 폴더 스캔 실패: {e}")
+
+    print(f"✅ 총 {len(available_folders)}개 이미지 폴더 발견")
+    return available_folders, folder_image_files
+
 def load_json(path):
     """JSON 파일을 로드합니다 (schema.json용)"""
     if not os.path.exists(path):
@@ -213,9 +255,24 @@ def load_json(path):
         except json.JSONDecodeError:
             return {}
 
-def load_csv_data():
-    """csv/ 폴더의 모든 CSV 파일을 로드하여 딕셔너리로 반환합니다"""
+def load_csv_data(available_folders):
+    """csv/ 폴더의 모든 CSV 파일을 로드하여 딕셔너리로 반환합니다
+
+    파일명 형식:
+    - 기존: 123.csv → form_number='123', folders=['123']
+    - 새로운: 123_456.csv → form_number='123_456', folders=['123', '456']
+
+    Args:
+        available_folders: set - 존재하는 이미지 폴더명 목록 (초기 스캔 결과)
+
+    Returns:
+        dict: {form_number: DataFrame}
+    """
     csv_data = {}
+    global form_to_csv_file, form_to_folders
+    form_to_csv_file = {}
+    form_to_folders = {}
+
     if not os.path.exists(CSV_DIR):
         print(f"경고: {CSV_DIR} 폴더가 없습니다.")
         return csv_data
@@ -224,57 +281,141 @@ def load_csv_data():
     print(f"📂 {len(csv_files)}개 CSV 파일 로드 중...")
 
     for csv_file in csv_files:
-        form_number = csv_file[:-4]  # 확장자 제거
         csv_path = os.path.join(CSV_DIR, csv_file)
+
+        # 확장자 제거 → 이것이 form_number가 됨
+        form_number = csv_file[:-4]
+
+        # '_'로 split하여 가능한 이미지 폴더들 추출
+        possible_folders = form_number.split('_')
+
+        # 실제로 존재하는 이미지 폴더만 필터링 (성능 최적화: set 사용)
+        existing_folders = [
+            folder for folder in possible_folders
+            if folder in available_folders
+        ]
+
+        if not existing_folders:
+            print(f"  ⚠️ {csv_file}: 해당하는 이미지 폴더를 찾을 수 없습니다 (시도: {', '.join(possible_folders)})")
+            continue
+
         try:
             df = pd.read_csv(csv_path, encoding='utf-8-sig', dtype=str)
+
+            # form_number를 키로 DataFrame 저장 (언더바 포함된 그대로)
             csv_data[form_number] = df
-            print(f"  ✓ {form_number}: {len(df)}행")
+            form_to_csv_file[form_number] = csv_file
+            form_to_folders[form_number] = existing_folders
+
+            folders_str = ', '.join(existing_folders)
+            print(f"  ✓ {form_number} (폴더: {folders_str}): {len(df)}행")
+
         except Exception as e:
-            print(f"  ✗ {form_number}: 로드 실패 - {e}")
+            print(f"  ✗ {csv_file}: 로드 실패 - {e}")
 
     return csv_data
 
 def save_csv_data(form_number, df):
-    """특정 form_number의 DataFrame을 CSV 파일로 저장합니다"""
-    csv_path = os.path.join(CSV_DIR, f"{form_number}.csv")
+    """특정 form_number의 DataFrame을 CSV 파일로 저장합니다
+
+    언더바 형식의 원본 CSV 파일(예: 123_456.csv)에 저장합니다.
+    """
+    # form_to_csv_file에서 원본 CSV 파일명 찾기
+    csv_filename = form_to_csv_file.get(form_number)
+
+    if not csv_filename:
+        # 폴백: 기존 방식 (form_number.csv)
+        csv_filename = f"{form_number}.csv"
+        print(f"⚠️ {form_number}에 대한 원본 CSV 파일 매핑을 찾을 수 없습니다. {csv_filename}로 저장합니다.")
+
+    csv_path = os.path.join(CSV_DIR, csv_filename)
     try:
         df.to_csv(csv_path, index=False, encoding='utf-8-sig')
-        print(f"💾 {form_number}.csv 저장 완료")
+        print(f"💾 {csv_filename} 저장 완료 (form: {form_number})")
         return True
     except Exception as e:
-        print(f"❌ {form_number}.csv 저장 실패: {e}")
+        print(f"❌ {csv_filename} 저장 실패: {e}")
         return False
 
-def convert_path(filename, form_number):
+def convert_path(filename, form_number, folder_image_files_cache):
     """파일명과 form_number를 조합하여 로컬 images/ 경로를 생성합니다
 
-    예: filename='A0000', form_number='068' -> 'images/068/A0000.jpg'
+    form_number가 여러 폴더를 포함할 수 있으므로 (예: '001_002'),
+    각 폴더에서 이미지 파일을 검색하여 실제 존재하는 경로를 반환합니다.
+
+    Args:
+        filename: 이미지 파일명 (확장자 제외)
+        form_number: form 번호 (언더바 포함 가능, 예: '001' 또는 '001_002')
+        folder_image_files_cache: dict - {폴더명: set(파일명)} 캐시
+
+    Returns:
+        str: 이미지 파일의 전체 경로 (존재하는 경우), 없으면 None
+
+    예:
+        - filename='A0001', form_number='001' -> 'images.notext/001/A0001.jpg'
+        - filename='B0001', form_number='001_002' -> 'images.notext/002/B0001.jpg'
     """
     if not form_number or not filename:
         return None
 
-    # .jpg 확장자 추가
-    filename_with_ext = f"{filename}.jpg"
-    return os.path.join(IMAGE_ROOT_PATH, form_number, filename_with_ext)
+    # form_number에 해당하는 가능한 폴더 목록 가져오기
+    # 폴백: form_to_folders에 없으면 언더바로 split
+    possible_folders = form_to_folders.get(form_number, form_number.split('_'))
+
+    # 각 폴더에서 이미지 파일 검색 (성능 최적화: set 조회)
+    for folder in possible_folders:
+        # 캐시에서 확인
+        if folder in folder_image_files_cache:
+            if filename in folder_image_files_cache[folder]:
+                # 이미지 파일 발견
+                filename_with_ext = f"{filename}.jpg"
+                return os.path.join(IMAGE_ROOT_PATH, folder, filename_with_ext)
+
+    # 어느 폴더에서도 찾지 못함
+    return None
 
 # --- Main Application Logic ---
-schema_json = load_json(SCHEMA_JSON_PATH)
-csv_data_frames = load_csv_data()  # {form_number: DataFrame}
+print("\n" + "="*60)
+print("📦 데이터 로딩 시작")
+print("="*60)
 
-# CSV 데이터를 converted_data_json 형식으로 변환 (기존 코드와 호환성 유지)
+# 1. 이미지 폴더 구조 스캔 (성능 최적화)
+available_image_folders, folder_image_files = scan_image_folders()
+
+# 2. Schema 로드
+schema_json = load_json(SCHEMA_JSON_PATH)
+
+# 3. CSV 데이터 로드 (스캔 결과 활용)
+form_to_csv_file = {}  # {form_number: csv_filename}
+form_to_folders = {}   # {form_number: [folder1, folder2, ...]}
+csv_data_frames = load_csv_data(available_image_folders)
+
+# 3-1. 언더바 form_number에 대한 schema 동적 생성
+# 예: 001_002 form이면 001의 schema를 사용
+for form_number in form_to_folders.keys():
+    if '_' in form_number and form_number not in schema_json:
+        # 첫 번째 폴더의 schema를 사용
+        first_folder = form_to_folders[form_number][0]
+        if first_folder in schema_json:
+            schema_json[form_number] = schema_json[first_folder]
+            print(f"  📋 Schema 복사: {first_folder} → {form_number}")
+
+# 4. CSV 데이터를 converted_data_json 형식으로 변환
 converted_data_json = {}
 for form_number, df in csv_data_frames.items():
     if 'image' not in df.columns:
-        print(f"경고: {form_number}.csv에 image 컬럼이 없습니다.")
+        print(f"⚠️ {form_number}: CSV에 image 컬럼이 없습니다.")
         continue
 
     form_data = {}
     for _, row in df.iterrows():
         filename = row['image']
-        local_path = convert_path(filename, form_number)
+
+        # convert_path()로 실제 이미지 경로 찾기 (여러 폴더 검색)
+        local_path = convert_path(filename, form_number, folder_image_files)
 
         if local_path is None:
+            # 이미지를 찾을 수 없음 (정상 동작 - 건너뛰기)
             continue
 
         # row를 딕셔너리로 변환 (image 제외)
@@ -283,16 +424,19 @@ for form_number, df in csv_data_frames.items():
 
     converted_data_json[form_number] = form_data
 
+print("="*60)
 print(f"✅ 총 {len(converted_data_json)}개 양식 로드 완료")
+print(f"📋 로드된 form_number 목록:")
+for form_num in converted_data_json.keys():
+    image_count = len(converted_data_json[form_num])
+    folders = form_to_folders.get(form_num, [])
+    print(f"  - {form_num}: {image_count}개 이미지 (폴더: {', '.join(folders)})")
+print("="*60 + "\n")
     
 # UI 업데이트를 위한 함수들
 def get_form_numbers():
-    """CSV 파일과 이미지 폴더가 모두 존재하는 form_number 목록을 반환합니다."""
-    all_forms = converted_data_json.keys()
-    existing_forms = [
-        form for form in all_forms if os.path.isdir(os.path.join(IMAGE_ROOT_PATH, form))
-    ]
-    return existing_forms
+    """로드된 form_number 목록을 반환합니다 (이미지가 존재하는 것만)."""
+    return list(converted_data_json.keys())
 
 def update_key_dropdown(form_number):
     if not form_number:
@@ -537,12 +681,12 @@ def update_view(form_number, key_number, current_index, state_data):
     image_cache.check_schema_changed()
 
     if not form_number or not key_number:
-        return state_data, None, "양식과 키를 선택하세요.", "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return state_data, None, "양식과 키를 선택하세요.", "0 / 0", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     # 현재 form_number에 해당하는 이미지 파일 목록 가져오기
     image_files = list(converted_data_json.get(form_number, {}).keys())
     if not image_files:
-        return state_data, None, "이미지 파일이 없습니다.", "0 / 0", "", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
+        return state_data, None, "이미지 파일이 없습니다.", "0 / 0", "", False, gr.update(visible=True), gr.update(visible=False, value=None), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
     total_images = len(image_files)
     # index 보정
@@ -633,24 +777,32 @@ def update_view(form_number, key_number, current_index, state_data):
     return state_data, None, "0 / 0", f"이미지 경로 오류: {image_path}", ocr_key_value, False, gr.update(value=f"이미지 또는 좌표 없음\nPath: {image_path}"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
 def change_image(state_data, direction):
-    if not state_data:
+    if not state_data or not isinstance(state_data, dict):
+        print(f"⚠️ change_image: state_data가 유효하지 않음 (타입: {type(state_data)})")
         return state_data, None, "상태 정보 없음", "", "", False, gr.update(value="상태 정보 없음"), gr.update(visible=False), gr.update(interactive=True), gr.update(interactive=True), gr.update(value=None), gr.update(interactive=True), gr.update(interactive=True)
 
-    current_index = state_data["current_index"]
-    total_images = len(state_data["image_files"])
+    current_index = state_data.get("current_index", 0)
+    image_files = state_data.get("image_files", [])
+    total_images = len(image_files)
+    form_number = state_data.get("form_number")
+    key_number = state_data.get("key_number")
+
+    print(f"🔍 change_image: form={form_number}, key={key_number}, current={current_index}, direction={direction}, total={total_images}")
 
     # 경계 체크: 범위를 벗어나면 현재 인덱스 유지
     new_index = current_index + direction
     if new_index < 0 or new_index >= total_images:
         new_index = current_index
+        print(f"⚠️ 경계 초과: new_index={new_index} (유지)")
 
-    return update_view(state_data["form_number"], state_data["key_number"], new_index, state_data)
+    print(f"→ update_view 호출: form={form_number}, key={key_number}, new_index={new_index}")
+    return update_view(form_number, key_number, new_index, state_data)
 
 def change_key(state_data, direction):
-    if not state_data or "form_number" not in state_data:
+    if not state_data or not isinstance(state_data, dict) or "form_number" not in state_data:
         return gr.Dropdown()
 
-    form_number = state_data["form_number"]
+    form_number = state_data.get("form_number")
     current_key = state_data.get("key_number")
     
     key_numbers = list(schema_json.get(form_number, {}).keys())
@@ -668,7 +820,12 @@ def change_key(state_data, direction):
 
 def change_form(state_data, direction):
     form_numbers = get_form_numbers()
-    current_form = state_data.get("form_number")
+
+    # state_data가 None이거나 딕셔너리가 아닌 경우 처리
+    if not state_data or not isinstance(state_data, dict):
+        current_form = None
+    else:
+        current_form = state_data.get("form_number")
 
     if not form_numbers:
         return gr.Dropdown(choices=[], value=None)
@@ -748,15 +905,15 @@ def determine_empty_value_symbol(df, key_number, form_number):
 
 def save_data(text_value, radio_value, state_data, request: gr.Request):
     """데이터를 CSV 파일에 직접 저장합니다"""
-    if not state_data:
+    if not state_data or not isinstance(state_data, dict):
         return "저장할 데이터가 없습니다.", gr.update(), state_data
 
-    key_info = schema_json.get(state_data["form_number"], {}).get(state_data["key_number"], {})
+    key_info = schema_json.get(state_data.get("form_number"), {}).get(state_data.get("key_number"), {})
     is_checkbox = key_info.get('checkbox', False)
 
-    form_number = state_data["form_number"]
-    local_image_path = state_data["image_path"]
-    key_number = state_data["key_number"]
+    form_number = state_data.get("form_number")
+    local_image_path = state_data.get("image_path")
+    key_number = state_data.get("key_number")
     current_index = state_data.get("current_index", 0)
 
     # DataFrame 가져오기
@@ -829,16 +986,20 @@ def save_data(text_value, radio_value, state_data, request: gr.Request):
 
 
 def open_image_file(state_data):
-    if state_data and "image_path" in state_data:
-        image_path = state_data["image_path"]
-        if os.path.exists(image_path):
+    if state_data and isinstance(state_data, dict) and "image_path" in state_data:
+        image_path = state_data.get("image_path")
+        if image_path and os.path.exists(image_path):
             os.startfile(os.path.abspath(image_path))
 
 def open_csv_file(state_data):
     """CSV 파일 열기 버튼 콜백"""
-    if state_data and "form_number" in state_data:
-        form_number = state_data["form_number"]
-        csv_path = os.path.join(CSV_DIR, f"{form_number}.csv")
+    if state_data and isinstance(state_data, dict) and "form_number" in state_data:
+        form_number = state_data.get("form_number")
+
+        # form_to_csv_file에서 원본 CSV 파일명 찾기
+        csv_filename = form_to_csv_file.get(form_number, f"{form_number}.csv")
+        csv_path = os.path.join(CSV_DIR, csv_filename)
+
         if os.path.exists(csv_path):
             print(f"📄 {csv_path} 파일을 엽니다.")
             os.startfile(os.path.abspath(csv_path))
@@ -847,7 +1008,7 @@ def open_csv_file(state_data):
 
 def clear_cache_and_reload_view(state_data):
     """이미지 캐시 청소 및 현재 뷰 재로드"""
-    if not state_data:
+    if not state_data or not isinstance(state_data, dict):
         return [state_data] + [gr.update() for _ in range(len(outputs_list) - 1)]
 
     print("🧹 이미지 캐시 청소를 시작합니다...")
@@ -856,9 +1017,9 @@ def clear_cache_and_reload_view(state_data):
 
     # 현재 상태를 사용하여 뷰를 강제로 다시 렌더링 (캐시 재생성 유도)
     return update_view(
-        state_data["form_number"],
-        state_data["key_number"],
-        state_data["current_index"],
+        state_data.get("form_number"),
+        state_data.get("key_number"),
+        state_data.get("current_index", 0),
         state_data
     )
 
@@ -870,7 +1031,7 @@ def toggle_text_rendering(enable, state_data):
     status = "활성화" if enable else "비활성화"
     print(f"📝 텍스트 렌더링 {status}")
 
-    if not state_data:
+    if not state_data or not isinstance(state_data, dict):
         return [state_data] + [gr.update() for _ in range(len(outputs_list) - 1)]
 
     # 캐시 청소 (텍스트 렌더링 설정 변경 시 기존 이미지는 무효화)
@@ -879,22 +1040,38 @@ def toggle_text_rendering(enable, state_data):
 
     # 현재 상태로 뷰 재로드
     return update_view(
-        state_data["form_number"],
-        state_data["key_number"],
-        state_data["current_index"],
+        state_data.get("form_number"),
+        state_data.get("key_number"),
+        state_data.get("current_index", 0),
         state_data
     )
 
 def reload_data_and_refresh_ui(state_data):
     """데이터 리로드 및 UI 새로고침"""
     global schema_json, csv_data_frames, converted_data_json
+    global form_to_csv_file, form_to_folders
+    global available_image_folders, folder_image_files
+
     print("🔄 데이터 리로드를 시작합니다...")
 
-    # 데이터 다시 로드
-    schema_json = load_json(SCHEMA_JSON_PATH)
-    csv_data_frames = load_csv_data()
+    # 1. 이미지 폴더 구조 재스캔
+    available_image_folders, folder_image_files = scan_image_folders()
 
-    # converted_data_json 재생성
+    # 2. Schema 로드
+    schema_json = load_json(SCHEMA_JSON_PATH)
+
+    # 3. CSV 데이터 로드 (내부에서 form_to_csv_file, form_to_folders 업데이트됨)
+    csv_data_frames = load_csv_data(available_image_folders)
+
+    # 3-1. 언더바 form_number에 대한 schema 동적 생성
+    for form_number in form_to_folders.keys():
+        if '_' in form_number and form_number not in schema_json:
+            first_folder = form_to_folders[form_number][0]
+            if first_folder in schema_json:
+                schema_json[form_number] = schema_json[first_folder]
+                print(f"  📋 Schema 복사: {first_folder} → {form_number}")
+
+    # 4. converted_data_json 재생성
     new_converted_data = {}
     for form_number, df in csv_data_frames.items():
         if 'image' not in df.columns:
@@ -902,7 +1079,8 @@ def reload_data_and_refresh_ui(state_data):
         form_data = {}
         for _, row in df.iterrows():
             filename = row['image']
-            local_path = convert_path(filename, form_number)
+            # convert_path()로 실제 이미지 경로 찾기 (여러 폴더 검색)
+            local_path = convert_path(filename, form_number, folder_image_files)
             if local_path is None:
                 continue
             ocr_data = {col: row[col] for col in df.columns if col != 'image'}
@@ -946,21 +1124,24 @@ def reload_data_and_refresh_ui(state_data):
 
 def export_current_csv(state_data):
     """현재 작업 중인 CSV를 EXTRACT 폴더에 복사하고 폴더를 엽니다"""
-    if not state_data or "form_number" not in state_data:
+    if not state_data or not isinstance(state_data, dict) or "form_number" not in state_data:
         return "⚠️ 작업 중인 CSV가 없습니다."
 
-    form_number = state_data["form_number"]
+    form_number = state_data.get("form_number")
 
     if form_number not in csv_data_frames:
-        return f"❌ {form_number}.csv 파일을 찾을 수 없습니다."
+        return f"❌ {form_number} 데이터를 찾을 수 없습니다."
 
     # EXTRACT 폴더 생성
     os.makedirs(EXTRACT_DIR, exist_ok=True)
 
+    # form_to_csv_file에서 원본 CSV 파일명 찾기
+    csv_filename = form_to_csv_file.get(form_number, f"{form_number}.csv")
+
     # 원본 CSV 경로
-    source_csv = os.path.join(CSV_DIR, f"{form_number}.csv")
-    # 대상 CSV 경로
-    dest_csv = os.path.join(EXTRACT_DIR, f"{form_number}.csv")
+    source_csv = os.path.join(CSV_DIR, csv_filename)
+    # 대상 CSV 경로 (원본 파일명 그대로 사용)
+    dest_csv = os.path.join(EXTRACT_DIR, csv_filename)
 
     try:
         # CSV 파일 복사
@@ -970,8 +1151,8 @@ def export_current_csv(state_data):
         # import subprocess
         # subprocess.Popen(['explorer', os.path.abspath(EXTRACT_DIR)])
 
-        print(f"📤 {form_number}.csv를 EXTRACT 폴더로 내보냈습니다.")
-        return f"✅ '{form_number}.csv' 내보내기 완료!"
+        print(f"📤 {csv_filename}를 EXTRACT 폴더로 내보냈습니다.")
+        return f"✅ '{csv_filename}' 내보내기 완료!"
 
     except FileNotFoundError:
         return f"❌ {source_csv} 파일을 찾을 수 없습니다."
@@ -1289,9 +1470,9 @@ with gr.Blocks(title="OCR 데이터 검수 도구 v5", css=custom_css, js=js_key
 
     # key 변경 시: Index 고정이 활성화되어 있으므로 항상 현재 index 유지
     def on_key_change(form, key, fix_index, state):
-        if fix_index and state and "current_index" in state:
+        if fix_index and state and isinstance(state, dict) and "current_index" in state:
             # Index 고정: 현재 index 유지
-            return update_view(form, key, state["current_index"], state)
+            return update_view(form, key, state.get("current_index", 0), state)
         else:
             # Index 고정 해제: index를 0으로 리셋
             return update_view(form, key, 0, state)
