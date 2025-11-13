@@ -633,7 +633,7 @@ def process_image_for_display(form_number, key_number, image_path, index):
             # 검은 글씨(0)는 그대로, 흰 배경(255)은 노란색으로
             blended_array = (base_array * highlighter_array / 255.0).astype(np.uint8)
 
-            result_img = Image.fromarray(blended_array, 'RGB')
+            result_img = Image.fromarray(blended_array)  # mode 파라미터 제거 (Pillow 13 대응)
 
             # 최종적으로 RGBA로 변환 (기존 알파 채널 유지)
             result_img = result_img.convert('RGBA')
@@ -657,9 +657,9 @@ def process_image_for_display(form_number, key_number, image_path, index):
                         elif value == "✘":
                             display_value = "X"
                         else:
-                            display_value = value
+                            display_value = str(value)  # 문자열 변환
                     else:
-                        display_value = value
+                        display_value = str(value)  # 문자열 변환
 
                     # key_number 텍스트 그리기 (value 위쪽)
                     key_text = f"({key_number})"
@@ -672,6 +672,8 @@ def process_image_for_display(form_number, key_number, image_path, index):
             return result_img
     except Exception as e:
         print(f"이미지 처리 실패: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def update_view(form_number, key_number, current_index, state_data):
