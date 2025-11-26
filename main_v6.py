@@ -14,9 +14,19 @@ import pandas as pd
 from cache_manager import CacheManager
 from fastapi import FastAPI
 
+# --- Print Margin Configuration ---
+# 인쇄 시 원본 이미지에 추가된 여백 비율 (0.0 ~ 1.0)
+# 좌표 보정: 실제_좌표 = (원본_좌표 * (1 - 좌우여백합)) + 좌측여백
+PRINT_MARGIN_LEFT = 0.04    # 좌측 여백 5%
+PRINT_MARGIN_RIGHT = 0.04   # 우측 여백 5%
+PRINT_MARGIN_TOP = 0.05     # 상단 여백 5%
+PRINT_MARGIN_BOTTOM = 0.02  # 하단 여백 5%
+
 # --- Configuration ---
 CSV_DIR = 'csv'
 SCHEMA_JSON_PATH = 'schema.json'
+SCHEMA_MASTERS_DIR = 'schema_masters'
+COORDINATE_MASTERS_DIR = 'coordinate_masters'
 IMAGE_ROOT_PATH = 'images.notext'
 CACHE_JSON_PATH = 'cache.json'
 DISK_CACHE_PATH = os.path.join(IMAGE_ROOT_PATH, '_cache')
@@ -202,6 +212,40 @@ image_cache = HybridImageCache()
 # 상태 관리 인스턴스 (Debouncing: 2초 대기 후 저장)
 cache_manager = CacheManager(cache_file=CACHE_JSON_PATH, debounce_delay=2.0)
 
+# --- Coordinate Adjustment Functions ---
+def adjust_coordinates_for_print_margin(x, y):
+    """인쇄 여백을 고려하여 좌표 보정
+
+    인쇄 시 원본 이미지에 여백이 추가되었으므로,
+    정규화된 좌표(0.0~1.0)를 실제 이미지 상의 위치로 변환
+
+    Args:
+        x: 정규화된 x 좌표 (0.0 ~ 1.0)
+        y: 정규화된 y 좌표 (0.0 ~ 1.0)
+
+    Returns:
+        tuple: (adjusted_x, adjusted_y) 보정된 좌표
+
+    예시:
+        원본 좌표가 (0.5, 0.5) 중앙이고, 좌우상하 각 5% 여백이면
+        실제 좌표는 (0.5 * 0.9 + 0.05, 0.5 * 0.9 + 0.05) = (0.5, 0.5)
+
+        원본 좌표가 (0.0, 0.0) 좌상단이면
+        실제 좌표는 (0.0 * 0.9 + 0.05, 0.0 * 0.9 + 0.05) = (0.05, 0.05)
+    """
+    if x is None or y is None:
+        return None, None
+
+    # 유효 영역 비율 (1 - 좌우여백합, 1 - 상하여백합)
+    content_width_ratio = 1.0 - PRINT_MARGIN_LEFT - PRINT_MARGIN_RIGHT
+    content_height_ratio = 1.0 - PRINT_MARGIN_TOP - PRINT_MARGIN_BOTTOM
+
+    # 좌표 보정: 원본 좌표를 축소된 영역에 맞춰 변환 후 좌측/상단 여백 추가
+    adjusted_x = x * content_width_ratio + PRINT_MARGIN_LEFT
+    adjusted_y = y * content_height_ratio + PRINT_MARGIN_TOP
+
+    return adjusted_x, adjusted_y
+
 # --- Data Loading ---
 def scan_image_folders():
     """이미지 폴더 구조를 스캔하여 성능 최적화용 캐시 생성
@@ -255,6 +299,122 @@ def load_json(path):
         except json.JSONDecodeError:
             return {}
 
+def load_jsonc(path):
+    """JSONC 파일을 로드합니다 (주석 제거 후 파싱)"""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # 라인별로 주석 제거 (JSON 문자열 내부의 // 오인식 방지)
+        import re
+        cleaned_lines = []
+        for line in lines:
+            # // 주석 제거 (라인 단위로 처리하여 안전성 향상)
+            line = re.sub(r'//.*$', '', line)
+            cleaned_lines.append(line)
+
+        content = ''.join(cleaned_lines)
+
+        # /* */ 주석 제거
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+
+        return json.loads(content)
+    except Exception as e:
+        print(f"⚠️ JSONC 로드 실패 ({path}): {e}")
+        return None
+
+def find_matching_jsonc(form_number, directory):
+    """form_number에 해당하는 JSONC 파일 찾기
+
+    파일명 형식:
+    - 단일: 069.jsonc
+    - 복수: 069-155.jsonc, 081-108_164-231_412.jsonc
+
+    Args:
+        form_number: 찾을 form 번호 (예: '069', '081')
+        directory: 검색할 디렉토리
+
+    Returns:
+        매칭되는 JSONC 파일 경로, 없으면 None
+    """
+    if not os.path.exists(directory):
+        return None
+
+    for filename in os.listdir(directory):
+        if not filename.endswith('.jsonc'):
+            continue
+
+        # 확장자 제거
+        base_name = filename[:-6]
+
+        # '-'로 구분된 여러 form 번호들
+        parts = base_name.split('-')
+
+        # 각 part에는 '_'로 구분된 번호들이 있을 수 있음
+        for part in parts:
+            sub_parts = part.split('_')
+            if form_number in sub_parts:
+                return os.path.join(directory, filename)
+
+    return None
+
+def build_schema_from_masters(form_number):
+    """schema_masters와 coordinate_masters를 결합하여 schema 생성
+
+    Args:
+        form_number: form 번호 (예: '069')
+
+    Returns:
+        dict: {index: {ocr_key, checkbox, x, y, ...}}
+    """
+    # 1. schema_masters에서 ocr_key, index 등 정보 로드
+    schema_file = find_matching_jsonc(form_number, SCHEMA_MASTERS_DIR)
+    if not schema_file:
+        print(f"⚠️ {form_number}에 대한 schema_masters 파일을 찾을 수 없습니다.")
+        return {}
+
+    schema_data = load_jsonc(schema_file)
+    if not schema_data:
+        return {}
+
+    # 2. coordinate_masters에서 좌표 정보 로드
+    coord_file = find_matching_jsonc(form_number, COORDINATE_MASTERS_DIR)
+    if not coord_file:
+        print(f"⚠️ {form_number}에 대한 coordinate_masters 파일을 찾을 수 없습니다.")
+        return {}
+
+    coord_data = load_jsonc(coord_file)
+    if not coord_data:
+        return {}
+
+    # 3. 결합
+    result = {}
+    for item in schema_data:
+        index = item.get('index')
+        if not index:
+            continue
+
+        # coordinate에서 l, t 가져오기
+        coord = coord_data.get(index, {})
+        x_raw = coord.get('l')  # left를 x로 사용
+        y_raw = coord.get('t')  # top을 y로 사용
+
+        # 안전한 float 변환 (문자열로 저장된 경우 대비)
+        x = float(x_raw) if x_raw is not None else None
+        y = float(y_raw) if y_raw is not None else None
+
+        # schema 구조 생성
+        result[index] = {
+            'ocr_key': item.get('ocr_key', ''),
+            'checkbox': item.get('type') == 'checkbox',
+            'x': x,
+            'y': y
+        }
+
+    return result
+
 def load_csv_data(available_folders):
     """csv/ 폴더의 모든 CSV 파일을 로드하여 딕셔너리로 반환합니다
 
@@ -300,7 +460,8 @@ def load_csv_data(available_folders):
             continue
 
         try:
-            df = pd.read_csv(csv_path, encoding='utf-8-sig', dtype=str)
+            # keep_default_na=False로 빈 문자열을 NaN으로 변환하지 않도록 설정
+            df = pd.read_csv(csv_path, encoding='utf-8-sig', dtype=str, keep_default_na=False, na_values=[])
 
             # form_number를 키로 DataFrame 저장 (언더바 포함된 그대로)
             csv_data[form_number] = df
@@ -382,7 +543,7 @@ print("="*60)
 # 1. 이미지 폴더 구조 스캔 (성능 최적화)
 available_image_folders, folder_image_files = scan_image_folders()
 
-# 2. Schema 로드
+# 2. Schema 로드 (기존 schema.json은 fallback용으로만 사용)
 schema_json = load_json(SCHEMA_JSON_PATH)
 
 # 3. CSV 데이터 로드 (스캔 결과 활용)
@@ -390,15 +551,27 @@ form_to_csv_file = {}  # {form_number: csv_filename}
 form_to_folders = {}   # {form_number: [folder1, folder2, ...]}
 csv_data_frames = load_csv_data(available_image_folders)
 
-# 3-1. 언더바 form_number에 대한 schema 동적 생성
-# 예: 001_002 form이면 001의 schema를 사용
+# 3-1. schema_masters와 coordinate_masters로부터 schema 생성
+print("\n📋 schema_masters/coordinate_masters로부터 schema 생성 중...")
 for form_number in form_to_folders.keys():
-    if '_' in form_number and form_number not in schema_json:
-        # 첫 번째 폴더의 schema를 사용
-        first_folder = form_to_folders[form_number][0]
-        if first_folder in schema_json:
-            schema_json[form_number] = schema_json[first_folder]
-            print(f"  📋 Schema 복사: {first_folder} → {form_number}")
+    # 언더바가 있는 경우 첫 번째 폴더 번호 사용
+    base_form_number = form_number.split('_')[0] if '_' in form_number else form_number
+
+    # masters로부터 schema 생성
+    generated_schema = build_schema_from_masters(base_form_number)
+
+    if generated_schema:
+        schema_json[form_number] = generated_schema
+        print(f"  ✓ {form_number}: {len(generated_schema)}개 필드")
+    else:
+        # masters에서 생성 실패 시 기존 schema.json에서 찾기 (fallback)
+        if '_' in form_number:
+            first_folder = form_to_folders[form_number][0]
+            if first_folder in schema_json:
+                schema_json[form_number] = schema_json[first_folder]
+                print(f"  ⚠️ {form_number}: fallback - {first_folder}에서 복사")
+        else:
+            print(f"  ⚠️ {form_number}: schema 생성 실패")
 
 # 4. CSV 데이터를 converted_data_json 형식으로 변환
 converted_data_json = {}
@@ -419,7 +592,16 @@ for form_number, df in csv_data_frames.items():
             continue
 
         # row를 딕셔너리로 변환 (image 제외)
-        ocr_data = {col: row[col] for col in df.columns if col != 'image'}
+        # NaN을 빈 문자열로 명시적 변환
+        ocr_data = {}
+        for col in df.columns:
+            if col != 'image':
+                value = row[col]
+                # pandas NaN 체크 및 빈 문자열 변환
+                if pd.isna(value) or value == 'nan':
+                    ocr_data[col] = ''
+                else:
+                    ocr_data[col] = str(value) if value else ''
         form_data[local_path] = ocr_data
 
     converted_data_json[form_number] = form_data
@@ -491,9 +673,12 @@ def generate_interactive_html(pil_image, form_number, button_size=20, debug_mode
             print(f"⚠️ 경고: {key}의 좌표가 범위를 벗어남 (x={x}, y={y})")
             continue
 
+        # 인쇄 여백을 고려한 좌표 보정
+        adjusted_x, adjusted_y = adjust_coordinates_for_print_margin(x, y)
+
         # 정규화된 좌표를 퍼센트로 변환
-        x_percent = x * 100
-        y_percent = y * 100
+        x_percent = adjusted_x * 100
+        y_percent = adjusted_y * 100
 
         # 버튼에 key를 data 속성으로 저장
         buttons_html += f"""
@@ -572,8 +757,15 @@ def process_image_for_display(form_number, key_number, image_path, index):
                 if x is None or y is None:
                     continue
 
+                # 인쇄 여백을 고려한 좌표 보정
+                adjusted_x, adjusted_y = adjust_coordinates_for_print_margin(x, y)
+
                 # OCR 값 가져오기
                 ocr_value = ocr_data.get(current_key, "N/A")
+
+                # NaN 체크 및 빈 문자열 변환
+                if pd.isna(ocr_value) or str(ocr_value).lower() == 'nan' or ocr_value == '':
+                    ocr_value = ""
 
                 # 조건별 형광펜 그리기 여부 결정
                 should_draw = False
@@ -585,8 +777,8 @@ def process_image_for_display(form_number, key_number, image_path, index):
                         should_draw = True
                         highlighter_size = (TEXT_FONT_SIZE, TEXT_FONT_SIZE)
                 else:
-                    # 일반 필드: ∅, ␣ 제외
-                    if ocr_value not in ["∅", "␣", "N/A"]:
+                    # 일반 필드: ∅, ␣, 빈 문자열 제외
+                    if ocr_value not in ["∅", "␣", "N/A", "", "nan"]:
                         should_draw = True
                         # 텍스트 폭 기반 크기 계산
                         text_str = str(ocr_value)
@@ -596,11 +788,11 @@ def process_image_for_display(form_number, key_number, image_path, index):
 
                 # 형광펜 그리기
                 if should_draw and highlighter_size:
-                    # 좌표를 실제 픽셀 좌표로 변환
-                    point_x = int(x * img_w)
-                    point_y = int(y * img_h)
-                    margin_x = 10
-                    margin_y = 20
+                    # 보정된 좌표를 실제 픽셀 좌표로 변환
+                    point_x = int(adjusted_x * img_w)
+                    point_y = int(adjusted_y * img_h)
+                    margin_x = 0
+                    margin_y = 0
 
                     draw.rectangle(
                         [point_x + margin_x,
@@ -1059,19 +1251,33 @@ def reload_data_and_refresh_ui(state_data):
     # 1. 이미지 폴더 구조 재스캔
     available_image_folders, folder_image_files = scan_image_folders()
 
-    # 2. Schema 로드
+    # 2. Schema 로드 (기존 schema.json은 fallback용으로만 사용)
     schema_json = load_json(SCHEMA_JSON_PATH)
 
     # 3. CSV 데이터 로드 (내부에서 form_to_csv_file, form_to_folders 업데이트됨)
     csv_data_frames = load_csv_data(available_image_folders)
 
-    # 3-1. 언더바 form_number에 대한 schema 동적 생성
+    # 3-1. schema_masters와 coordinate_masters로부터 schema 생성
+    print("\n📋 schema_masters/coordinate_masters로부터 schema 생성 중...")
     for form_number in form_to_folders.keys():
-        if '_' in form_number and form_number not in schema_json:
-            first_folder = form_to_folders[form_number][0]
-            if first_folder in schema_json:
-                schema_json[form_number] = schema_json[first_folder]
-                print(f"  📋 Schema 복사: {first_folder} → {form_number}")
+        # 언더바가 있는 경우 첫 번째 폴더 번호 사용
+        base_form_number = form_number.split('_')[0] if '_' in form_number else form_number
+
+        # masters로부터 schema 생성
+        generated_schema = build_schema_from_masters(base_form_number)
+
+        if generated_schema:
+            schema_json[form_number] = generated_schema
+            print(f"  ✓ {form_number}: {len(generated_schema)}개 필드")
+        else:
+            # masters에서 생성 실패 시 기존 schema.json에서 찾기 (fallback)
+            if '_' in form_number:
+                first_folder = form_to_folders[form_number][0]
+                if first_folder in schema_json:
+                    schema_json[form_number] = schema_json[first_folder]
+                    print(f"  ⚠️ {form_number}: fallback - {first_folder}에서 복사")
+            else:
+                print(f"  ⚠️ {form_number}: schema 생성 실패")
 
     # 4. converted_data_json 재생성
     new_converted_data = {}
@@ -1085,7 +1291,16 @@ def reload_data_and_refresh_ui(state_data):
             local_path = convert_path(filename, form_number, folder_image_files)
             if local_path is None:
                 continue
-            ocr_data = {col: row[col] for col in df.columns if col != 'image'}
+            # NaN을 빈 문자열로 명시적 변환
+            ocr_data = {}
+            for col in df.columns:
+                if col != 'image':
+                    value = row[col]
+                    # pandas NaN 체크 및 빈 문자열 변환
+                    if pd.isna(value) or value == 'nan':
+                        ocr_data[col] = ''
+                    else:
+                        ocr_data[col] = str(value) if value else ''
             form_data[local_path] = ocr_data
         new_converted_data[form_number] = form_data
     converted_data_json = new_converted_data

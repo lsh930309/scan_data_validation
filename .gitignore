@@ -4,6 +4,10 @@
 **/__pycache__/
 cache.json
 
+*.jsonc
+*.json
+*.jpg
+
 # Google Drive 동기화 관련
 credentials.json
 token.json
